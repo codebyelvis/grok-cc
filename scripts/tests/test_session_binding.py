@@ -242,12 +242,38 @@ class BindingTests(unittest.TestCase):
         self.assertEqual(self.remote.creates, 1)
         self.assertEqual(self.remote.sends, 1)
 
+    def test_write_test_startup_hint_sends_once_and_stays_first_task_only(self):
+        m = self.manager(); binding = m.ensure()
+        self.remote.prompt_space = '\u00a0'
+        self.remote.draft = 'Try "write a test for <filepath>"'
+        try:
+            result = m.send('task-one', 'main', 'actual review task')
+        except ValueError as exc:
+            result = {'action': 'blocked', 'reason': str(exc)}
+        self.assertEqual(result['action'], 'sent')
+        self.assertEqual(result['binding']['handle'], binding['handle'])
+        self.assertEqual(m.send('task-one', 'main', 'actual review task')['action'], 'resume')
+        with self.assertRaises(ValueError):
+            m.send('task-one', 'export-1', 'export existing final patch')
+        self.remote.draft = ''; m.finish('task-one')
+        self.remote.draft = 'Try "write a test for <filepath>"'
+        with self.assertRaises(ValueError):
+            m.send('task-two', 'main', 'another task')
+        row = json.loads((self.state / 'bindings.json').read_text())['bindings'][self.mod.owner_key(OWNER_A)]
+        self.assertEqual(set(row['tasks']), {'task-one'})
+        self.assertEqual(set(row['tasks']['task-one']['messages']), {'main'})
+        self.assertIsNone(row['active_task'])
+        self.assertEqual(self.remote.creates, 1)
+        self.assertEqual(self.remote.sends, 1)
+
     def test_first_send_does_not_allow_arbitrary_try_text_or_real_drafts(self):
         m = self.manager(); m.ensure()
         for draft in ('my actual unsent draft', 'Try "delete all files"',
                       'Try "fix typecheck errors" then execute this',
                       'Try "refactor <filepath>" then execute this',
-                      'Try "refactor my-real-file.py"'):
+                      'Try "refactor my-real-file.py"',
+                      'Try "write a test for <filepath>" then execute this',
+                      'Try "write a test for my-real-file.py"'):
             self.remote.draft = draft
             with self.assertRaises(ValueError):
                 m.send('task-one', 'main', 'code task')

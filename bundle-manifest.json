@@ -5,9 +5,9 @@
     "agents/openai.yaml": "a6b5b9c379e42c86b6bf0d8ed127a7f0d5a816f420512a4f31d103b8baf774c1",
     "references/final-patch-prompt.md": "af74d4d4271b078f36aa50907f5d1a8971f53c83180d3c6b201e2d4d0ebc46d4",
     "references/session-binding.md": "390730adca8c06882febf5d010da14936e28f255911165d7caff437b95752282",
-    "scripts/session_binding.py": "02a212826a19868cde20f63c40fd0d2974aefbe7ceec57b1c74de63eb2355a87",
+    "scripts/session_binding.py": "ca6b156f04826893cfee457246214b5dc10e31a2d7920def349aaf5d206d6e80",
     "scripts/task_packet.py": "7849f673a694461002ce5242a800ff0ca4518a4ce48481bbbeeab1ed9eb582ea",
-    "scripts/tests/test_session_binding.py": "ec0e41105e1612fd12e66981c70f0b03a5771dc4219fbcf3c3f1b367795a7793",
+    "scripts/tests/test_session_binding.py": "39c5c51de1601025069c24438bc8dfe34e41ec7e21b1ad8c15259aa3a558de4e",
     "scripts/tests/test_task_packet.py": "c80f2cbc4ededb1a32f14cfeada70d5446cdfe9c5a17b8bd5570eac6da9243da"
   }
 }

@@ -256,7 +256,7 @@ class BindingManager:
         allowed = {''}
         if not row['tasks']:
             allowed.update(('Try "edit <filepath> to..."', 'Try "fix typecheck errors"',
-                            'Try "refactor <filepath>"'))
+                            'Try "refactor <filepath>"', 'Try "write a test for <filepath>"'))
         if content not in allowed:
             raise ValueError('Bound CC has a nonempty or ambiguous draft; preserve it')
         cursor = stream['result']['terminal'].get('latestCursor')
