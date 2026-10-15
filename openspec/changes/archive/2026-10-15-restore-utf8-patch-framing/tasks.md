@@ -18,7 +18,7 @@
 
 ## 3. Delivery
 
-- [ ] 按用户授权精选提交/推送并核验远端 exact revision 和四组合 CI。
-- [ ] 从已发布 revision 隔离 staging；核验安装前像/并发漂移后最后更新本地载荷，保留绑定与原生配置。
-- [ ] 验证 active suite、Codex/Claudex 发现和 parity，完成独立 Final Review。
-- [ ] 核对 proposal/tasks 和 Git 残留，按可用生命周期规则归档/严格验证并如实汇报。
+- [x] 按用户授权精选提交/推送并核验远端 exact revision 和四组合 CI。
+- [x] 从已发布 revision 隔离 staging；核验安装前像/并发漂移后最后更新本地载荷，保留绑定与原生配置。
+- [x] 验证 active suite、Codex/Claudex 发现和 parity，完成独立 Final Review。
+- [x] 核对 proposal/tasks 和 Git 残留，按可用生命周期规则归档/严格验证并如实汇报。

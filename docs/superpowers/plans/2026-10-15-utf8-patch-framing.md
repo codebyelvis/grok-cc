@@ -10,7 +10,7 @@
 
 **Tech Stack:** Python stdlib，Git，Make；Python 3.11/3.13，macOS/Linux。
 
-**Spec:** `openspec/changes/restore-utf8-patch-framing/proposal.md`、`design.md`、`specs/utf8-patch-validation/spec.md`。用户已明确批准本提案。
+**Spec:** `openspec/changes/archive/2026-10-15-restore-utf8-patch-framing/proposal.md`、`design.md`、`specs/utf8-patch-validation/spec.md`。用户已明确批准本提案。
 
 ## Global Constraints
 
@@ -44,15 +44,21 @@
 
 ## Task 2: Publish, synchronize, and close
 
-- [ ] Preserve approved proposal preimage outside checkout; reconcile source checkout's own untracked proposal before a fast-forward merge. Verify no source drift. Stage only approved product files and this change's governance artifacts, using Chinese Conventional Commit with grouped body and elvis author.
-- [ ] Push exact reviewed revision to existing origin/master, no force; verify remote and all four existing CI jobs.
-- [ ] Use official skill-installer to download that exact revision into a new private staging directory; `make check` there. Preserve active payload preimage, permissions and entry links; compare accepted baseline immediately before update.
-- [ ] Sync only reviewed bundle files after successful source push/CI, preserving registry and native configuration. Run active suite and Skill validator; check both Codex/Claudex entry targets and all eight hashes.
-- [ ] Independent Final Review checks source/remote/CI/staging/active evidence and actual complete diff, reruns critical evidence and an independent boundary probe.
-- [ ] Reconcile OpenSpec tasks, archive only once required delivery gates pass, validate archived artifacts; publish any necessary documentation-only closeout, verify corresponding source/active parity.
+- [x] Preserve approved proposal preimage outside checkout; reconcile source checkout's own untracked proposal before a fast-forward merge. Verify no source drift. Stage only approved product files and this change's governance artifacts, using Chinese Conventional Commit with grouped body and elvis author.
+- [x] Push exact reviewed revision to existing origin/master, no force; verify remote and all four existing CI jobs.
+- [x] Use official skill-installer to download that exact revision into a new private staging directory; `make check` there. Preserve active payload preimage, permissions and entry links; compare accepted baseline immediately before update.
+- [x] Sync only reviewed bundle files after successful source push/CI, preserving registry and native configuration. Run active suite and Skill validator; check both Codex/Claudex entry targets and all eight hashes.
+- [x] Independent Final Review checks source/remote/CI/staging/active evidence and actual complete diff, reruns critical evidence and an independent boundary probe.
+- [x] Reconcile OpenSpec tasks, archive after required product delivery gates pass, and strictly validate archived artifacts. The documentation-only closeout is published separately and its remote/CI/payload parity is verified before final reporting.
 
 ## Rollback and Stop
 
 Keep published base and private active preimage. Stop overwrites on concurrent source or active drift; never discard unknown edits. Recovery uses retained preimage only within authorization and only if current files still match this upgrade. Any requirement beyond this approved contract returns to scope review. A failed/missing test, Review or CI is not completion.
 
 Private logs/packets/receipts stay outside Git. No repeated cloud invocation is needed: its original static Review is complete and the original task was closed through the helper.
+
+## Delivery record
+
+The product repair was published as `0c6a011f05dbe951dba6a7dd8966e18f2c84cea2` (0.1.0.dev1). [Four hosted CI jobs](https://github.com/codebyelvis/grok-cc/actions/runs/38694933421) passed; source, official exact-revision staging and active each passed 41 tests. Implementation Review and separate Final Review passed. Exactly two installed payload files changed; all eight payloads match both Codex and Claudex entries. Bindings, entry links and native configuration were preserved.
+
+This closeout contains only progress reconciliation, archive movement and the consolidated approved specification; it does not alter product payload. Private audit evidence and rollback preimages are retained outside Git. Historical cloud/Tailscale intermittency remains outside this repair.
