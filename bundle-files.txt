@@ -1,0 +1,8 @@
+SKILL.md
+agents/openai.yaml
+references/final-patch-prompt.md
+references/session-binding.md
+scripts/session_binding.py
+scripts/task_packet.py
+scripts/tests/test_session_binding.py
+scripts/tests/test_task_packet.py

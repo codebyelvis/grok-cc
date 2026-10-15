@@ -1,0 +1,4 @@
+interface:
+  display_name: "Grok CC 本地派活"
+  short_description: "在 Mac 读取本地项目，通过 Orca 派给云端 Claude Code，回收补丁并本地验证"
+  default_prompt: "使用 $grok-cc 将当前 Mac 项目的开发任务派给 Grok Bot 的 Claude Code，保留本地改动并在 Mac 验证。"

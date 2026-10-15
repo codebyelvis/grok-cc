@@ -1,0 +1,38 @@
+# 本机生成物
+.DS_Store
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+.pytest_cache/
+.coverage
+htmlcov/
+dist/
+build/
+
+# 认证、运行状态和本机配置
+.env
+.env.*
+*.pem
+*.key
+*.p12
+*.pfx
+.claude/
+.codex/
+.local/
+bindings.json
+bindings.lock
+pending-*
+*.sqlite
+*.sqlite3
+*.db
+*.db-*
+
+# 私有任务产物与排障材料
+private/
+evidence/
+packets/
+replies/
+*.patch
+*.log
+*.jsonl

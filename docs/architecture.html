@@ -1,0 +1,63 @@
+<!doctype html>
+<html lang="zh-CN"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>grok-cc / Terminal blueprint</title>
+<!-- Author: elvis. Self-contained static diagram. -->
+<style>*{box-sizing:border-box}html,body{margin:0;background:#0b0f14;color:#c9d1d9;font:13px 'JetBrains Mono','SF Mono',Menlo,monospace}main{width:100%;margin:auto}svg{display:block;width:100%;height:auto}p{color:#7d8590;font-size:11px;text-align:center;margin:0 0 18px;padding:0 20px}a{color:#79a8ff}a:focus{outline:1px solid #79a8ff}</style></head><body><main><svg xmlns="http://www.w3.org/2000/svg" width="1600" height="1080" viewBox="0 0 1600 1080" role="img" aria-labelledby="flow-title flow-desc">
+<!-- Author: elvis. Static workflow; no runtime health is implied. -->
+<title id="flow-title">grok-cc / Local Mac to cloud Claude Code and back</title>
+<desc id="flow-desc">Mac source and controller prepare an explicit packet, use one bound cloud Claude Code through Orca, recover a complete patch, and validate, review, apply and test it locally. Missing output stops admission. Bindings persist between tasks. This is a static workflow, not live health.</desc>
+<defs>
+<style>text{font-family:'JetBrains Mono','SF Mono',Menlo,monospace} .title{fill:#f0f6fc;font-size:20px;font-weight:700} .sub{font-size:18px} .detail{fill:#7d8590;font-size:13px} .label{fill:#7d8590;font-size:11px} .heading{fill:#f0f6fc;font-size:21px;font-weight:700}</style>
+<marker id="arrow-blue" viewBox="0 0 8 8" refX="7" refY="4" markerWidth="7" markerHeight="7" orient="auto"><path d="M0 0L8 4L0 8Z" fill="#79a8ff"/></marker>
+<marker id="arrow-cyan" viewBox="0 0 8 8" refX="7" refY="4" markerWidth="7" markerHeight="7" orient="auto"><path d="M0 0L8 4L0 8Z" fill="#5ad1e6"/></marker>
+<marker id="arrow-green" viewBox="0 0 8 8" refX="7" refY="4" markerWidth="7" markerHeight="7" orient="auto"><path d="M0 0L8 4L0 8Z" fill="#6fdc8c"/></marker>
+<marker id="arrow-amber" viewBox="0 0 8 8" refX="7" refY="4" markerWidth="7" markerHeight="7" orient="auto"><path d="M0 0L8 4L0 8Z" fill="#e8b25d"/></marker>
+<marker id="arrow-purple" viewBox="0 0 8 8" refX="7" refY="4" markerWidth="7" markerHeight="7" orient="auto"><path d="M0 0L8 4L0 8Z" fill="#b48cff"/></marker>
+</defs>
+<rect width="1600" height="1080" fill="#0b0f14"/>
+<rect x="24" y="24" width="1552" height="1008" fill="none" stroke="#3a4450"/>
+<rect x="48" y="10" width="590" height="30" fill="#0b0f14"/>
+<text x="60" y="32" class="heading">GROK-CC / LOCAL → CLOUD → LOCAL</text>
+<text x="60" y="65" class="label">GUARDED HANDOFF · EXPLICIT CONTEXT · LOCAL ACCEPTANCE</text>
+<rect x="1338" y="10" width="214" height="28" fill="#0b0f14"/>
+<text x="1540" y="30" text-anchor="end" class="label">STATIC FLOW / 静态示意</text>
+<line x1="60" y1="103" x2="88" y2="103" stroke="#79a8ff"/><text x="98" y="107" fill="#79a8ff" font-size="12">LOCAL / 本地</text>
+<line x1="330" y1="103" x2="358" y2="103" stroke="#e8b25d"/><text x="368" y="107" fill="#e8b25d" font-size="12">OWNERSHIP / 归属</text>
+<line x1="640" y1="103" x2="668" y2="103" stroke="#5ad1e6"/><text x="678" y="107" fill="#5ad1e6" font-size="12">TRANSPORT / 通道</text>
+<line x1="970" y1="103" x2="998" y2="103" stroke="#6fdc8c"/><text x="1008" y="107" fill="#6fdc8c" font-size="12">RESULT / 产物</text>
+<line x1="1250" y1="103" x2="1278" y2="103" stroke="#b48cff"/><text x="1288" y="107" fill="#b48cff" font-size="12">ACCEPTANCE / 验收</text>
+<g><rect x="76" y="160" width="368" height="160" fill="#0b0f14" stroke="#79a8ff" stroke-width="1"/><text x="260" y="200" text-anchor="middle" class="title">LOCAL PROJECT</text><text x="260" y="232" text-anchor="middle" class="sub" fill="#79a8ff">Mac 本地项目</text><text x="260" y="272" text-anchor="middle" class="detail">Source of truth · local files</text><text x="260" y="296" text-anchor="middle" class="detail">Only explicitly selected context</text></g>
+<g><rect x="616" y="160" width="368" height="160" fill="#0b0f14" stroke="#79a8ff" stroke-width="1"/><text x="800" y="200" text-anchor="middle" class="title">LOCAL CONTROLLER</text><text x="800" y="232" text-anchor="middle" class="sub" fill="#79a8ff">Codex / 已有 Claudex</text><text x="800" y="272" text-anchor="middle" class="detail">Read scope · preserve local edits</text><text x="800" y="296" text-anchor="middle" class="detail">$grok-cc  /  /grok-cc</text></g>
+<g><rect x="1156" y="160" width="368" height="160" fill="#0b0f14" stroke="#79a8ff" stroke-width="1"/><text x="1340" y="200" text-anchor="middle" class="title">TASK PACKET</text><text x="1340" y="232" text-anchor="middle" class="sub" fill="#79a8ff">任务快照与基线</text><text x="1340" y="272" text-anchor="middle" class="detail">File allowlist · SHA256</text><text x="1340" y="296" text-anchor="middle" class="detail">No credentials / native state</text></g>
+<g><rect x="76" y="464" width="368" height="160" fill="#0b0f14" stroke="#e8b25d" stroke-width="1"/><text x="260" y="504" text-anchor="middle" class="title">SESSION BINDING</text><text x="260" y="536" text-anchor="middle" class="sub" fill="#e8b25d">一会话 · 一云端 CC</text><text x="260" y="576" text-anchor="middle" class="detail">Native owner + runtime + incarnation</text><text x="260" y="600" text-anchor="middle" class="detail">Keep drafts · record intent first</text></g>
+<g><rect x="616" y="464" width="368" height="160" fill="#0b0f14" stroke="#5ad1e6" stroke-width="1"/><text x="800" y="504" text-anchor="middle" class="title">ORCA TRANSPORT</text><text x="800" y="536" text-anchor="middle" class="sub" fill="#5ad1e6">原生派发与回执</text><text x="800" y="576" text-anchor="middle" class="detail">Same task / message → same receipt</text><text x="800" y="600" text-anchor="middle" class="detail">Busy / offline → retain binding</text></g>
+<g><rect x="1156" y="464" width="368" height="160" fill="#0b0f14" stroke="#6fdc8c" stroke-width="1"/><text x="1340" y="504" text-anchor="middle" class="title">REMOTE CLAUDE CODE</text><text x="1340" y="536" text-anchor="middle" class="sub" fill="#6fdc8c">Grok Bot 云端执行</text><text x="1340" y="576" text-anchor="middle" class="detail">Auto mode · supplied snapshot only</text><text x="1340" y="600" text-anchor="middle" class="detail">Cloud cwd ≠ Mac project</text></g>
+<g><rect x="76" y="768" width="368" height="160" fill="#0b0f14" stroke="#6fdc8c" stroke-width="1"/><text x="260" y="808" text-anchor="middle" class="title">COMPLETE PATCH</text><text x="260" y="840" text-anchor="middle" class="sub" fill="#6fdc8c">当前任务的完整产物</text><text x="260" y="880" text-anchor="middle" class="detail">BEGIN_PATCH … END_PATCH</text><text x="260" y="904" text-anchor="middle" class="detail">Missing / clipped → stop admission</text></g>
+<g><rect x="616" y="768" width="368" height="160" fill="#0b0f14" stroke="#b48cff" stroke-width="1"/><text x="800" y="808" text-anchor="middle" class="title">LOCAL PATCH CHECK</text><text x="800" y="840" text-anchor="middle" class="sub" fill="#b48cff">Mac 本地准入校验</text><text x="800" y="880" text-anchor="middle" class="detail">Allowlist · baseline · path / symlink</text><text x="800" y="904" text-anchor="middle" class="detail">git apply --check · no source writes</text></g>
+<g><rect x="1156" y="768" width="368" height="160" fill="#0b0f14" stroke="#b48cff" stroke-width="1"/><text x="1340" y="808" text-anchor="middle" class="title">VERIFY &amp; REVIEW</text><text x="1340" y="840" text-anchor="middle" class="sub" fill="#b48cff">审查 · 应用 · 测试 · 独立审核</text><text x="1340" y="880" text-anchor="middle" class="detail">Keep binding for the next task</text><text x="1340" y="904" text-anchor="middle" class="detail">finish ≠ project PASS</text></g>
+<path d="M444 240H616" fill="none" stroke="#79a8ff" stroke-width="1.3" marker-end="url(#arrow-blue)"/>
+<text x="530" y="225" text-anchor="middle" class="label">READ / 读取</text>
+<path d="M984 240H1156" fill="none" stroke="#79a8ff" stroke-width="1.3" marker-end="url(#arrow-blue)"/>
+<text x="1070" y="225" text-anchor="middle" class="label">PREPARE / 快照</text>
+<path d="M1340 320V388H260V464" fill="none" stroke="#79a8ff" stroke-width="1.3" marker-end="url(#arrow-blue)"/>
+<text x="800" y="376" text-anchor="middle" class="label">PREPARED CONTEXT / 交给固定会话</text>
+<circle cx="1340" cy="388" r="2.5" fill="#79a8ff"/>
+<circle cx="260" cy="388" r="2.5" fill="#79a8ff"/>
+<path d="M444 544H616" fill="none" stroke="#e8b25d" stroke-width="1.3" marker-end="url(#arrow-amber)"/>
+<text x="530" y="529" text-anchor="middle" class="label">GUARDED / 受控派发</text>
+<path d="M984 544H1156" fill="none" stroke="#5ad1e6" stroke-width="1.3" marker-end="url(#arrow-cyan)"/>
+<text x="1070" y="529" text-anchor="middle" class="label">SEND ONCE / 单次提交</text>
+<path d="M1340 624V692H260V768" fill="none" stroke="#6fdc8c" stroke-width="1.3" stroke-dasharray="6 6" marker-end="url(#arrow-green)"/>
+<text x="800" y="680" text-anchor="middle" class="label">ASYNC RESULT / 只回收本任务完整补丁</text>
+<circle cx="1340" cy="692" r="2.5" fill="#6fdc8c"/>
+<circle cx="260" cy="692" r="2.5" fill="#6fdc8c"/>
+<path d="M444 848H616" fill="none" stroke="#6fdc8c" stroke-width="1.3" marker-end="url(#arrow-green)"/>
+<text x="530" y="833" text-anchor="middle" class="label">CHECK / 校验</text>
+<path d="M984 848H1156" fill="none" stroke="#b48cff" stroke-width="1.3" marker-end="url(#arrow-purple)"/>
+<text x="1070" y="833" text-anchor="middle" class="label">ADMIT / 通过后</text>
+<path d="M1340 928V984H46V240H76" fill="none" stroke="#b48cff" stroke-width="1.3" stroke-dasharray="6 6" marker-end="url(#arrow-purple)"/>
+<text x="800" y="972" text-anchor="middle" class="label">NEXT TASK / 复用原绑定</text>
+<circle cx="1340" cy="984" r="2.5" fill="#b48cff"/>
+<circle cx="46" cy="984" r="2.5" fill="#b48cff"/>
+<text x="60" y="1058" class="label">SOLID = synchronous step · DASHED = asynchronous result / next task</text>
+<text x="1540" y="1058" text-anchor="end" class="label">SOURCE ≠ INSTALLED · RECEIPT ≠ COMPLETE · NO LIVE HEALTH CLAIM</text>
+</svg><p>本图为静态工作流程，不代表远端在线或任务已验收。 / Workflow only; not live availability or task acceptance.</p></main></body></html>
