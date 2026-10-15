@@ -2,7 +2,7 @@
 
 [简体中文](README.md) | [English](README.en.md)
 
-Author: elvis. Version: `0.1.0.dev0`, a development version with no formal release yet.
+Author: elvis. Version: `0.1.0.dev1`, a development version with no formal release yet.
 
 Delegate local Mac development tasks to Claude Code on the Grok Bot cloud computer through Orca. Recover the patch, then check, review, apply and test it on the Mac.
 

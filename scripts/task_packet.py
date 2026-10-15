@@ -107,7 +107,12 @@ def prepare(root, names, task):
 
 def diff_paths(diff):
     """Parse narrow text diffs. Native git validates actual hunk/context semantics."""
-    lines = diff.splitlines()
+    # Git frames patch lines with LF; other Unicode separators are payload.
+    lines = diff.split('\n')
+    if lines[-1] == '':
+        lines.pop()
+    # Accept existing CRLF syntax without changing the original diff bytes.
+    lines = [line.removesuffix('\r') for line in lines]
     touched = []
     i = 0
     while i < len(lines):
@@ -179,12 +184,12 @@ def check(manifest, reply):
         raise ValueError('Project root changed')
     tid = manifest['task_id']
     begin, end = f'BEGIN_PATCH {tid}', f'END_PATCH {tid}'
-    lines = reply.splitlines(keepends=True)
-    starts = [i for i, line in enumerate(lines) if line.rstrip('\r\n') == begin]
-    ends = [i for i, line in enumerate(lines) if line.rstrip('\r\n') == end]
+    lines = reply.split('\n')
+    starts = [i for i, line in enumerate(lines) if line.removesuffix('\r') == begin]
+    ends = [i for i, line in enumerate(lines) if line.removesuffix('\r') == end]
     if len(starts) != 1 or len(ends) != 1 or starts[0] >= ends[0]:
         raise ValueError('Need unique complete markers bound to this task')
-    diff = ''.join(lines[starts[0]+1:ends[0]])
+    diff = '\n'.join(lines[starts[0]+1:ends[0]]) + '\n'
     if len(diff.encode('utf-8')) > MAX_TOTAL or '\0' in diff:
         raise ValueError('Oversized or binary patch')
     touched = diff_paths(diff)
@@ -244,7 +249,7 @@ def main():
             print(json.dumps({'task_id': manifest['task_id'], 'packet': args.out}))
         else:
             manifest = json.loads(Path(args.packet).read_text())
-            diff = check(manifest, Path(args.reply).read_text())
+            diff = check(manifest, Path(args.reply).read_bytes().decode('utf-8'))
             write_external_output(args.out, diff, manifest['project_root'])
             print(json.dumps({'task_id': manifest['task_id'], 'result': 'checked-only', 'patch': args.out}))
     except (ValueError, OSError, KeyError, subprocess.TimeoutExpired) as exc:

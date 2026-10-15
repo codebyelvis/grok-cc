@@ -2,7 +2,7 @@
 
 [简体中文](README.md) | [English](README.en.md)
 
-作者：elvis。当前版本：`0.1.0.dev0`，开发版本，尚无正式 release。
+作者：elvis。当前版本：`0.1.0.dev1`，开发版本，尚无正式 release。
 
 在 Mac 上读取项目，将必要源码交给 Grok Bot 云电脑里的 Claude Code，通过 Orca 回收补丁，再在 Mac 校验、应用和测试。
 

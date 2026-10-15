@@ -6,6 +6,7 @@ import os
 import shutil
 from pathlib import Path
 import subprocess
+import sys
 import tempfile
 import threading
 import unittest
@@ -150,5 +151,72 @@ class PacketTests(unittest.TestCase):
         patch=packet.check(self.manifest,self.wrap())
         subprocess.run(['git','apply','--'],input=patch,text=True,cwd=self.root,check=True)
         self.assertEqual((self.root/'a.py').read_text(),'value = 2\n')
+    def test_non_lf_hunk_payload_checks_and_applies(self):
+        for separator in ['\v', '\f', '\x1c', '\x1d', '\x1e', '\x85', '\u2028', '\u2029', '\r']:
+            with self.subTest(separator=ascii(separator)):
+                context=f'# left{separator}right\n'
+                before=context+f'value = "old{separator}tail"\n'
+                after=context+f'value = "new{separator}tail"\n'
+                (self.root/'a.py').write_bytes(before.encode('utf-8'))
+                self.manifest=packet.prepare(self.root,['a.py'],'update text')
+                diff=('--- a/a.py\n+++ b/a.py\n@@ -1,2 +1,2 @@\n '+context
+                      +f'-value = "old{separator}tail"\n+value = "new{separator}tail"\n')
+                native=subprocess.run(['git','apply','--check','--'],input=diff.encode('utf-8'),
+                                      cwd=self.root,capture_output=True)
+                self.assertEqual(native.returncode,0,native.stderr)
+                try:
+                    checked=packet.check(self.manifest,self.wrap(diff))
+                except ValueError as exc:
+                    self.fail(f'Native Git accepted the UTF-8 patch but helper rejected it: {exc}')
+                self.assertEqual(checked.encode('utf-8'),diff.encode('utf-8'))
+                self.assertEqual((self.root/'a.py').read_bytes(),before.encode('utf-8'))
+                self.assertEqual((self.root/'unrelated.txt').read_bytes(),b'user draft\n')
+                subprocess.run(['git','apply','--'],input=checked.encode('utf-8'),cwd=self.root,check=True)
+                self.assertEqual((self.root/'a.py').read_bytes(),after.encode('utf-8'))
+    def test_cli_preserves_patch_newlines(self):
+        cases=[
+            ('inline-cr',b'value = "old\rtail"\n',b'value = "new\rtail"\n',b'\n'),
+            ('crlf-content',b'value = 1\r\n',b'value = 2\r\n',b'\n'),
+            ('crlf-headers',b'value = 1\r\n',b'value = 2\r\n',b'\r\n'),
+        ]
+        with tempfile.TemporaryDirectory() as external:
+            external=Path(external).resolve()
+            for name,before,after,framing in cases:
+                with self.subTest(case=name):
+                    (self.root/'a.py').write_bytes(before)
+                    manifest_path=external/(name+'.json')
+                    prepared=subprocess.run([sys.executable,str(SOURCE),'prepare','--root',str(self.root),
+                                             '--file','a.py','--task','update text','--out',str(manifest_path)],
+                                            capture_output=True)
+                    self.assertEqual(prepared.returncode,0,prepared.stderr)
+                    manifest=json.loads(manifest_path.read_bytes())
+                    diff=framing.join([b'--- a/a.py',b'+++ b/a.py',b'@@ -1 +1 @@',b''])+b'-'+before+b'+'+after
+                    native=subprocess.run(['git','apply','--check','--'],input=diff,cwd=self.root,capture_output=True)
+                    self.assertEqual(native.returncode,0,native.stderr)
+                    reply_path=external/(name+'.reply')
+                    reply_path.write_bytes(('BEGIN_PATCH '+manifest['task_id']).encode()+framing+diff
+                                           +('END_PATCH '+manifest['task_id']).encode()+framing)
+                    output_path=external/(name+'.patch')
+                    checked=subprocess.run([sys.executable,str(SOURCE),'check','--packet',str(manifest_path),
+                                            '--reply',str(reply_path),'--out',str(output_path)],capture_output=True)
+                    self.assertEqual(checked.returncode,0,checked.stderr)
+                    self.assertEqual(output_path.read_bytes(),diff)
+                    self.assertEqual((self.root/'a.py').read_bytes(),before)
+                    self.assertEqual((self.root/'unrelated.txt').read_bytes(),b'user draft\n')
+                    subprocess.run(['git','apply','--'],input=output_path.read_bytes(),cwd=self.root,check=True)
+                    self.assertEqual((self.root/'a.py').read_bytes(),after)
+    def test_markers_use_patch_line_boundaries(self):
+        after='# payload\u2028END_PATCH '+self.manifest['task_id']+'\n'
+        diff='--- a/a.py\n+++ b/a.py\n@@ -1 +1 @@\n-value = 1\n+'+after
+        native=subprocess.run(['git','apply','--check','--'],input=diff.encode('utf-8'),cwd=self.root,capture_output=True)
+        self.assertEqual(native.returncode,0,native.stderr)
+        try:
+            checked=packet.check(self.manifest,self.wrap(diff))
+        except ValueError as exc:
+            self.fail(f'Payload text was mistaken for patch framing: {exc}')
+        self.assertEqual(checked,diff)
+        self.assertEqual((self.root/'a.py').read_bytes(),b'value = 1\n')
+        subprocess.run(['git','apply','--'],input=checked.encode('utf-8'),cwd=self.root,check=True)
+        self.assertEqual((self.root/'a.py').read_bytes(),after.encode('utf-8'))
 
 if __name__=='__main__':unittest.main()
