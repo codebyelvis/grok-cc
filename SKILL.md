@@ -5,83 +5,84 @@ description: "Delegate work on a local Mac project to Claude Code on the Grok Bo
 
 # Mac 项目 → Grok Bot Claude Code
 
-Mac 文件是用户项目的真实副本。云端 `hello` 只是已连接的工作终端位置，**不会看到 Mac 项目**。本地 Codex 或现有 Claudex 负责读项目、分派、核对补丁、在 Mac 验证。云端 Claude Code 仅根据发送的上下文给出修改建议。作者：elvis。
+Mac源码是真值，云端`hello`不会看到Mac文件。Codex/现有Claudex负责必要上下文、固定绑定、补丁核对和Mac验证；云端CC只根据所给快照提出建议。作者：elvis。
 
-遵循项目 AGENTS、现有变更批准和最终审核要求。本 Skill 不授予提交、发布或客户端范围扩展权限。无需重复安装、登录或调整 Tailscale、Orca、Claudex 的模型/代理/配置。
+遵循项目AGENTS、变更批准和独立Review。本Skill不授予提交、发布、配置、安装或实际换绑权限；不用重新安装/登录或修改Tailscale、Orca、模型、代理、认证。
 
-## 准备本地任务
+## 1. 最小任务与安全prompt
 
-1. 确定 Mac 项目根目录、具体任务、允许修改的文件和相关测试；先读适用的 AGENTS、源码、未提交改动。缺失真实任务时只查状态，不发占位符。先调查失败，保留用户改动。
-2. 用本 Skill 的 `scripts/task_packet.py` 生成显式文件快照。每次任务的 packet / reply / patch 放在项目外的私有临时目录，不能覆盖现有输出。允许显式列出的不存在新文件。原始 packet 始终留在本地，不能用云端内容替换它。
+先读适用规则、源码和用户改动，确定一个task_id、最少白名单及Mac验收条件；首轮先小，跑通check/apply/本地测试后再扩大。缺真实任务只查状态，不发送占位符。
+
+packet/reply/checked.patch/prompt始终放项目外私有目录，不覆盖既有文件。packet含Mac来源和基线，只留本地，不能用云端内容替代；外发只用render结果并人工审查。
 
 ```text
-python3 <skill-dir>/scripts/task_packet.py prepare --root <Mac项目绝对路径> --file src/labels.py --task '明确任务、期望与本地测试约束' --out <项目外>/packet.json
+python3 <skill-dir>/scripts/task_packet.py prepare --root <Mac根目录> --file src/labels.py --task '具体需求与Mac验收条件' --out <项目外>/packet.json
+python3 <skill-dir>/scripts/task_packet.py render --packet <原packet.json> --out <项目外>/prompt.txt
 ```
 
-3. 审查即将发送的任务和源码，只发送必要文件及从相关只读依赖提取的必要上下文。助手排除常见敏感文件路径，但无法识别所有内嵌秘密；**不要发送凭据、认证/native配置、会话、历史、日志、hooks、密钥、完整仓库或依赖目录**。不要尝试同步 Mac/云端 Claude 登录。本地 manifest 中的 root 仅表示来源，云端不能读取它。
+prepare/render共用最终prompt默认120KiB预算，报告字节及粗略token估算；超限先缩小白名单，不打包整仓。明确审查后可用`--max-bytes`调阈值，但文件/总量/安全限制仍有效。助手扫描常见secret并仅报安全位置，不保证识别所有秘密：**不发送凭据、native配置、会话、历史、日志、hooks、密钥或完整依赖目录**，不同步Mac/云端登录。
 
-## 通过原生 Orca 派活
+截图、视频、扫描件不进入CC对话，先用已有合法本地/云端CLI得到必要文字摘要，再作为任务说明。prepare默认拒绝媒体扩展名；`--allow-binary`只放宽扩展名，绝不允许真实二进制、NUL、非UTF-8或已识别编码媒体，不自动转码/编码。
 
-先加载已安装的官方 `orca-cli` Skill（它调用 `orca skills get orca-cli`，与当前 CLI 匹配）；按本机 `--help` 使用参数。这里默认环境名 `Grok Bot`，参数放在子命令后。
+生产prompt要求：补丁块外最多10行结论，不复述任务、不贴完整日志；已有日志只报路径/计数并标非Mac验收，不诱导云端项目测试。统一模板、临时diff工具计算及hash协议见[最终补丁请求](references/final-patch-prompt.md)：开头/结束分别由BEGIN_PATCH或END_PATCH、空格、单独给定的task_id拼接，不在prompt中展开带真实ID的完整标记行。diff后、结束前必须有PATCH_SHA256及PATCH_LINES，计算对象仅原始diff字节及LF数，不含元数据。
+
+## 2. 固定会话后一次提交
+
+先加载当前可执行文件提供的官方orca-cli guide，按对应--help发现环境/worktree；以下仅示意，参数放子命令后，不猜不支持的参数。
 
 ```text
 orca status --environment 'Grok Bot' --json
 orca terminal list --environment 'Grok Bot' --json
-orca terminal read --environment 'Grok Bot' --terminal <handle> --screen --json
 ```
 
-**先固定会话归属，再派活。** 同一个 Mac 会话持续复用一个云端 CC；不同会话不共用，忙碌、断连或超时都不换窗。使用本 Skill 的 `scripts/session_binding.py` 管理绑定和发送，不能再扫描“任意空闲 CC”或直接 `terminal create/send` 绕过绑定。完整参数及恢复边界见 [会话绑定](references/session-binding.md)。
+同一本地会话持续使用一个绑定CC，不扫描空闲池或直接terminal create/send绕过helper。**不自动新建终端**；任务授权、时间压力和“自行推进”都不能代替用户对具体创建目标的明确选择。
 
-- Codex：助手读取当前工具环境的 `CODEX_THREAD_ID`，helper 可直接取这个值。
-- Claudex：本次原生 Skill 渲染的本地会话 ID 是 `${CLAUDE_SESSION_ID}`，作为 `--session-id` 传入。它不是 shell 环境变量；若仍是占位符或没有取得真实 ID，就停止，不用目录、PID、task_id 或随机 ID 代替。
+- Codex使用当前CODEX_THREAD_ID，helper可读取；不能以外部UUID覆盖。
+- Claudex本次原生渲染ID为`${CLAUDE_SESSION_ID}`，须作为`--session-id`传入。它不是shell环境变量；未取到真实ID或仍是占位符即停止，不用PID/目录/随机值替代。
 
 ```text
-python3 <skill-dir>/scripts/session_binding.py ensure --controller <codex或claudex> --session-id <真实本地会话ID> --project-root <Mac根目录> --environment 'Grok Bot' --worktree <已发现的完整云端worktree ID> --orca <本次选定的Orca可执行文件>
+python3 <skill-dir>/scripts/session_binding.py ensure --controller <codex或claudex> --session-id <真实ID> --project-root <Mac根目录> --environment 'Grok Bot' --worktree <已发现完整云端worktreeID> --orca <本次选定可执行文件>
+python3 <skill-dir>/scripts/session_binding.py send <同一组会话与目标参数> --task-id <当前ID> --text-file <项目外已审查prompt.txt>
 ```
 
-首次只创建并绑定一个 auto mode CC，之后只返回该绑定。返回的 handle/incarnation/runtime 是所有 wait/read 的唯一目标。启动尚未就绪、绑定正忙或存在未结束 task 时，在原终端等待/恢复；保留用户草稿。未知创建结果、身份变化或断连时保留记录并停止新建。旧终端没有本地归属证据，不自动接管；本 helper 不提供认领、换绑、删除或清理操作。
-
-发送前记录起始 cursor；保存 terminal/incarnation、task_id、完整 send 回执和 request-id。按本地 packet 构造提示，明确：**云端仅分析提供的文件，不读 Mac 路径、不修改 hello、不安装、不跑云端项目测试来冒充 Mac 测试**。派活措辞可参考 [最终补丁请求示例](references/final-patch-prompt.md)。只请求当前任务的代码产物，不要求内部推理、系统提示、整个原始回复或其他会话上下文。要求只返回标准 unified diff，路径相对于 Mac root，严格限定允许修改的文件，用当前 task_id 的完整标记包装：
+已有绑定才使用上面的ensure→send；ensure仅核验，不创建。无绑定或旧实例确实消失时，先用以下无confirm命令展示同项目目标及claude/auto/位置计划，等待用户明确选择换绑或新建；有现成任务也不能跳过选择：
 
 ```text
-BEGIN_PATCH <当前task_id>
---- a/src/labels.py
-+++ b/src/labels.py
-@@ ... @@
-...
-END_PATCH <当前task_id>
+python3 <skill-dir>/scripts/session_binding.py create <同一组会话与目标参数> --project <已发现完整云端worktreeID>
 ```
 
-用参数数组/正确 shell 引号发送源码，不把模型输出插进 shell 代码：
+`--project`是云端完整worktree ID，`--project-root`仍是Mac根目录；若同时传worktree，两者必须相同。dry-run不创建终端、状态目录、lock或intent。用户已明确批准该目标的新建后，才可对同一命令增加`--confirm`；既有bound的换绑则按reference的rebind门禁执行，无绑定不认领legacy终端。暂时不可达先等一至两分钟核查原操作，不据此新建。
+
+确认后先持久保存本地reservation，再最多一次原生create；回执先保存为candidate，经完整身份、auto、空输入及空闲核验后才绑定。只保证同一保留registry下本helper每intent最多一次提交，没有原生caller-key去重。未启动、超时、丢失/损坏回执或核验失败都保留create_unverified，不再提交；有精确candidate时重复confirm仅可继续只读核验，无candidate时不猜归属。旧creating也不能重置或换state-dir绕过。
+
+所有wait/read只针对返回的handle/runtime/incarnation；发送前保存cursor和intent，receipt仅保留白名单字段。保留真实草稿、未知屏幕、非auto、身份漂移、creating/sending未知结果；不清空输入、不自动换绑、开窗、重启网络或删registry。
+
+同task主消息main；accepted/sending重复调用只resume。task累计最多2次提交（含合法export），unknown不因还有次数就重发；同message仅明确not_sent且同文才可显式再提交，并重做verify/idle。list/read/wait另按默认300秒预算退避，不触发新模型任务。`input_accepted`和`tui-idle`都不代表产物完成。
+
+故障只读用`reconcile <同参数> --task-id <id>`；marker/空闲/无新输入不能解锁。当前原生`--retry-request`缺官方契约，在任何Orca调用前unsupported，不能手工send绕过。只有已有bound、无active/unknown且用户确认精确目标后，才允许显式rebind，旧绑定归档不删除。完整[状态、退避、换绑门禁和错误决策表](references/session-binding.md)。
+
+## 3. 完整回收、Mac检查与验收
+
+按官方能力从保存cursor读完整stream；screen回退、裁剪、历史缺页、权限/模型提示未解决时停止，不猜补丁。transcript/token不足及云端jsonl只读降级见[长回复与降级](references/final-patch-prompt.md#长回复与降级)。回收不新增shell/终端，也没有collect自动完整回收功能。
+
+main已accepted、无unknown且有剩余次数时，仅经用户明确要求，才可同task用export-1重导出既有最终补丁修正格式。不能连续导出、重新执行开发任务、索要内部推理/其他会话，或绕过模型拦截；不完整产物先停止报告。
 
 ```text
-python3 <skill-dir>/scripts/session_binding.py send --controller <codex或claudex> --session-id <真实本地会话ID> --project-root <Mac根目录> --environment 'Grok Bot' --worktree <同一完整云端worktree ID> --orca <同一Orca可执行文件> --task-id <当前task_id> --text-file <项目外已审查的任务提示文件>
-orca terminal wait --environment 'Grok Bot' --terminal <handle> --for tui-idle --timeout-ms 60000 --json
-orca terminal read --environment 'Grok Bot' --terminal <handle> --cursor <发送前cursor> --limit 1000 --json
+python3 <skill-dir>/scripts/task_packet.py check --packet <原packet.json> --reply <完整原字节reply.txt> --out <项目外>/checked.patch
 ```
 
-相同 task_id 的主消息固定为 `main`：重复调用 helper 只返回原回执/待确认状态，不能换 task_id 再发来绕过去；新任务必须等待前一任务结束。读取 helper 保存的起始 cursor 和完整 send 回执。`input_accepted` 不是执行完成，`tui-idle` 不是成功回复，必须读回此任务的完整产物。断连后只读恢复和继续读取；有原生回执的 request-id 时才按官方规则原样 `--retry-request`。没有回执的未知结果不要盲目新发，不杀会话、不重启网络。如果 output 从 stream 回退到 screen、裁剪或丢弃历史，不能拼凑补丁。
+check不改项目；默认核对唯一有效hashed产物、原字节SHA/LF数、白名单、所有选定文件基线/新增缺席、路径/symlink、hunk及真实git apply --check。旧无hash回复只能显式`--allow-unhashed`，不能挽救损坏hashed块。只支持UTF-8文本修改/新增，不支持删除/重命名/二进制/权限变更/空白文件名。
 
-**长回复或屏幕不可完整还原标准 diff**：先读官方 `orchestration` Skill，仅对既有绑定终端对应的 worker 使用 `worker-read --source transcript` 与 cursor 完整性规则。不能为换输出通道再创建 CC、协调者终端或 shell；当前入口没有所需能力时如实停止回收。已有发出的任务不得重新执行来换输出通道；可通过同一 helper、同一 task_id 的显式 `--message-id export-1` 发一条只要求重导出当前最终补丁的消息；重复该 message-id 只恢复原回执。遇模型安全拦截时按错误说明处理，不能借导出消息重发被拦请求。内容缺页、缺结束标记、问题/权限提示没解决时停止应用，报告实际状态。不能从 TUI 丢失的空格猜补丁。
+审读补丁与源码，应用前用新输出名重新check；基线漂移先协调，不reset/force或覆盖本地用户文件。再用标准git apply应用checked.patch，运行Mac项目所需测试及独立Review；云端PASS和hash都不是Mac业务验收。未经授权不暂存/提交/推送。
 
-## 回到 Mac 核对、应用和验证
+核对结果或如实记录阻碍后，原CC空闲且无unknown时用finish结束task，保留绑定/历史，project_pass=false不等于项目完成。下一任务仍复用当前绑定。
 
-将完整、未经改写的补丁回复保存为项目外 reply 文件：
+## 4. 可选调度员摘要
 
-```text
-python3 <skill-dir>/scripts/task_packet.py check --packet <原始packet.json> --reply <reply.txt> --out <项目外>/checked.patch
-```
+Grok Bot只调度，重活交CC；grok-cc是Mac直连入口，不需要bot对话中转源码。若任务来自云端`/workspace/handoff/`，只取目标、白名单和完成标准，Mac仍是真值。
 
-`check` 不改项目；它检查任务标记、文件白名单、SHA256/新增文件缺席基线、路径/symlink 和实际 `git apply --check`。只支持 UTF-8 文本的修改/新增；删除、重命名、二进制、权限变更、含空白文件名暂不支持。需要这些操作时报告限制，使用项目已有受控方式，不能绕过 guard 强行应用。
+`task_packet.py handoff-summary --task-id <id> --packet <原packet> --out <项目外summary.md>`生成最多15行摘要；可显式提供受限`--mac-test <label:pass或fail或not_run:通过数:失败数>`、`--unverified <短标签>`、`--category <类别>`。helper不执行测试，缺证据就未验证，不含源码/diff/secret，不读共享registry。无packet时需可靠project-root边界。
 
-审读 checked.patch 与实际源码，确认符合请求和项目批准范围。应用前重新跑 check（输出用新文件名）；本地基线发生变化就先协调用户改动并重新分派或合并审查，不能 reset、force、用云端文件覆盖。随后用标准 `git apply -- <checked.patch>` 在 Mac root 应用，运行该项目所需的本地测试与独立审核。不得把云端声称的 PASS 当作本地通过。不要自动暂存/提交/推送。
+只有用户另行同意目标和内容后，才由用户/本地主控将摘要追加到云端`/workspace/handoff/tasks/<文件>.md`的结果/待确认章节；helper不做任何远端写入。
 
-完成本轮结果核对或如实记录阻碍、且原终端已空闲后，用 `session_binding.py finish`（同一组会话/项目/环境/worktree 参数与 `--task-id`）结束派发任务，保留绑定及发送历史。它只释放本轮派活占用，不宣称项目 PASS；未知发送结果不能 finish。下一任务仍使用原终端。
-
-汇报改动文件、实际 Mac 测试结果，以及未验证项。模型安全拦截、本机配置读取失败、远程不可达和补丁完整性问题应按实际报错区分，参见 [准确解释阻碍](references/final-patch-prompt.md#准确解释阻碍)；不能仅凭 reasoning_extraction 推断请求违规或上下文过长。云端额度/登录提示/网络阻碍如实报告；不自动切换身份或将本地 Claude 改成云端账号。
-
-维护本 Skill 的助手时，运行随包回归：
-
-```text
-PYTHONDONTWRITEBYTECODE=1 python3 -m unittest discover -s <skill-dir>/scripts/tests -v
-```
+维护本Skill时运行`make check`（独立安装副本可运行随包unittest）。分别报告本地通过、真实远端未验证、模型拦截、网络故障、产物裁剪和剩余风险，不自动换账号/模型或把Mac登录改成云端身份。

@@ -1,6 +1,8 @@
 #!/usr/bin/env python3
 """Author: elvis. Local context snapshots and read-only unified diff validation."""
 import argparse
+import base64
+import binascii
 import hashlib
 import json
 import os
@@ -13,6 +15,20 @@ import uuid
 
 MAX_FILE = 128 * 1024
 MAX_TOTAL = 400 * 1024
+MAX_PROMPT = 120 * 1024
+SECRET = re.compile(r'AKIA[A-Z0-9]{16}|ghp_[A-Za-z0-9]{30,}|github_pat_[A-Za-z0-9_]{20,}'
+                    r'|sk-[A-Za-z0-9_-]{20,}|xox[abp]-[A-Za-z0-9-]{10,}|tskey-[A-Za-z0-9_-]{10,}'
+                    r'|-----BEGIN [A-Z ]*PRIVATE KEY-----')
+RESPONSE_RULES = '''Only analyze the supplied Mac snapshot; do not read or modify the cloud project, install, or run cloud project tests.
+Outside the patch block, give at most 10 lines of conclusions; do not repeat the task or paste full logs.
+Existing logs: report only paths and pass/fail counts, explicitly not Mac acceptance; do not run tests to create logs.
+Create the suggested diff only as a temporary artifact and use tools to calculate its SHA256 and LF byte count.
+The opening line joins BEGIN_PATCH, one ASCII space, and task_id; do not use Markdown fences.
+After the LF-terminated original diff, output PATCH_SHA256 plus space plus 64 lowercase hex digits,
+then PATCH_LINES plus space plus the decimal LF count, each on its own line.
+The closing line joins END_PATCH, one ASCII space, and task_id.
+Hash and count only the original diff bytes, excluding metadata and markers. Preserve CR/CRLF and all UTF-8 payload bytes.
+'''
 PRIVATE_PARTS = {'.git', '.ssh', '.aws', '.config', '.claude', '.codex', '.agents', '.tailscale', 'sessions', 'history', 'logs', '__pycache__', 'node_modules'}
 
 
@@ -83,13 +99,109 @@ def read_selected(root, name):
         os.close(fd)
 
 
-def prepare(root, names, task):
+MEDIA_EXTENSIONS = frozenset(('.png', '.jpg', '.jpeg', '.gif', '.webp', '.heic', '.heif', '.bmp',
+                              '.tif', '.tiff', '.svg', '.pdf', '.mp4', '.mov', '.webm', '.mkv', '.avi'))
+CATEGORIES = ('none', 'unreachable', 'busy', 'identity_changed', 'uncertain_send', 'invalid_input',
+              'integrity_failure', 'unsupported_contract', 'model_blocked')
+
+
+def media_magic(raw):
+    head = raw.removeprefix(b'\xef\xbb\xbf').lstrip()
+    return (head.startswith((b'\x89PNG\r\n\x1a\n', b'\xff\xd8\xff', b'GIF87a', b'GIF89a',
+                             b'%PDF-', b'\x1a\x45\xdf\xa3', b'OggS'))
+            or (head.startswith(b'RIFF') and head[8:12] == b'WEBP')
+            or (len(head) >= 16 and head[4:8] == b'ftyp'
+                and 16 <= int.from_bytes(head[:4], 'big') <= len(head))
+            or re.match(br'(?:<\?xml[^>]*>\s*)?<svg(?:\s|>)', head[:1024]) is not None)
+
+
+def reject_media(text):
+    if media_magic(text.encode('utf-8')) or re.search(r'data:(?:image/|video/|audio/|application/pdf[;,])', text, re.I):
+        raise ValueError('Media content is excluded; supply a necessary text summary')
+    for match in re.finditer(r'[A-Za-z0-9+/]{16,}={0,2}', text):
+        encoded = match[0]
+        if len(encoded) > MAX_TOTAL:
+            continue
+        try:
+            decoded = base64.b64decode(encoded, validate=True)
+        except (ValueError, binascii.Error):
+            continue
+        if media_magic(decoded):
+            raise ValueError('Recognized encoded media is excluded; supply a text summary')
+
+
+def scan_secret(text, label):
+    match = SECRET.search(text)
+    if match:
+        line = text[:match.start()].count('\n') + 1
+        raise ValueError(f'Potential secret in {label}, line {line}; remove it before export')
+
+
+def validate_packet(manifest):
+    if not isinstance(manifest, dict) or manifest.get('schema') != 1:
+        raise ValueError('Unsupported packet schema')
+    tid, task, files = manifest.get('task_id'), manifest.get('task'), manifest.get('files')
+    if (not isinstance(tid, str) or not re.fullmatch(r'[A-Za-z0-9._:-]{1,128}', tid)
+            or not isinstance(task, str) or not task.strip() or not isinstance(files, dict) or not files):
+        raise ValueError('Invalid packet task or explicit file list')
+    scan_secret(tid, 'task_id'); scan_secret(task, 'task'); reject_media(task)
+    root = Path(manifest['project_root'])
+    if not root.is_absolute() or root.is_symlink() or root.resolve(strict=True) != root or not root.is_dir():
+        raise ValueError('Project root changed')
+    total = 0
+    for index, (name, before) in enumerate(files.items(), 1):
+        if not isinstance(name, str) or not isinstance(before, dict):
+            raise ValueError('Invalid snapshot entry')
+        scan_secret(name, f'file path #{index}')
+        safe_path(root, name)
+        content, digest = before.get('content'), before.get('sha256')
+        if content is None and digest is None:
+            continue
+        if not isinstance(content, str) or not isinstance(digest, str):
+            raise ValueError('Invalid snapshot content or hash')
+        raw = content.encode('utf-8'); total += len(raw)
+        if len(raw) > MAX_FILE or total > MAX_TOTAL or b'\0' in raw:
+            raise ValueError('Context too large or binary')
+        scan_secret(content, name); reject_media(content)
+        if hashlib.sha256(raw).hexdigest() != digest:
+            raise ValueError('Snapshot content/hash mismatch')
+    return root
+
+
+def prompt_metrics(text):
+    size = len(text.encode('utf-8'))
+    return {'prompt_bytes': size, 'token_estimate': (size + 3) // 4,
+            'token_estimate_basis': 'rough UTF-8 bytes/4, not an exact tokenizer'}
+
+
+def render(manifest, max_bytes=MAX_PROMPT):
+    validate_packet(manifest)
+    if type(max_bytes) is not int or max_bytes <= 0:
+        raise ValueError('max-bytes must be a positive integer')
+    parts = ['task_id: ' + manifest['task_id'], 'Task:\n' + manifest['task'], RESPONSE_RULES]
+    parts.append('Allowed relative paths:\n' + '\n'.join(manifest['files']))
+    for name, before in manifest['files'].items():
+        parts.append('File: ' + name + '\n' + (before['content'] if before['content'] is not None else '(new file, absent)'))
+    text = '\n\n'.join(parts) + '\n'
+    size = len(text.encode('utf-8'))
+    if size > max_bytes:
+        raise ValueError(f'Prompt budget exceeded: {size} > {max_bytes} bytes; reduce the file allowlist, not the whole repository')
+    return text
+
+
+def prepare(root, names, task, max_bytes=MAX_PROMPT, allow_binary=False):
     root = Path(root).resolve(strict=True)
     if not root.is_dir() or not task.strip() or not names or len(names) != len(set(names)):
         raise ValueError('Need a directory, task and unique explicit file list')
+    scan_secret(task, 'task')
     files = {}
     total = 0
-    for name in names:
+    for index, name in enumerate(names, 1):
+        if not isinstance(name, str):
+            raise ValueError('Invalid file path')
+        scan_secret(name, f'file path #{index}')
+        if not allow_binary and Path(name).suffix.lower() in MEDIA_EXTENSIONS:
+            raise ValueError('Media extension is excluded; supply a text summary; allow-binary only waives the extension gate')
         raw = read_selected(root, name)
         if raw is None:
             files[name] = {'sha256': None, 'content': None}
@@ -101,8 +213,68 @@ def prepare(root, names, task):
             content = raw.decode('utf-8')
         except UnicodeDecodeError as exc:
             raise ValueError('Context must be UTF-8') from exc
+        scan_secret(content, name)
         files[name] = {'sha256': hashlib.sha256(raw).hexdigest(), 'content': content}
-    return {'schema': 1, 'task_id': str(uuid.uuid4()), 'project_root': str(root), 'task': task, 'files': files}
+    manifest = {'schema': 1, 'task_id': str(uuid.uuid4()), 'project_root': str(root), 'task': task, 'files': files}
+    render(manifest, max_bytes)  # The same final UTF-8 budget is checked before any packet is written.
+    return manifest
+
+
+def handoff_summary(task_id, manifest=None, mac_tests=(), unverified=(), category='none'):
+    if not isinstance(task_id, str) or not re.fullmatch(r'[A-Za-z0-9._:-]{1,128}', task_id):
+        raise ValueError('Invalid summary task identity')
+    scan_secret(task_id, 'task_id')
+    names = []
+    if manifest is not None:
+        validate_packet(manifest)
+        if manifest['task_id'] != task_id:
+            raise ValueError('Summary task differs from packet')
+        names = list(manifest['files'])
+    if (category not in CATEGORIES or not isinstance(mac_tests, (list, tuple))
+            or not isinstance(unverified, (list, tuple)) or len(mac_tests) > 8 or len(unverified) > 8):
+        raise ValueError('Invalid or oversized summary fields')
+    for field in (*mac_tests, *unverified):
+        if not isinstance(field, str):
+            raise ValueError('Invalid summary field')
+        scan_secret(field, 'summary field')
+    for value in mac_tests:
+        match = re.fullmatch(r'([A-Za-z][A-Za-z0-9_.-]{0,63}):(pass|fail|not_run):([0-9]{1,9}):([0-9]{1,9})', value)
+        if not match:
+            raise ValueError('Mac evidence requires label:pass|fail|not_run:passed:failed, not logs or code')
+        state, passed, failed = match[2], int(match[3]), int(match[4])
+        if ((state == 'pass' and (not passed or failed)) or (state == 'fail' and not failed)
+                or (state == 'not_run' and (passed or failed))):
+            raise ValueError('Mac test status/counts disagree')
+    if any(not re.fullmatch(r'[A-Za-z][A-Za-z0-9_.-]{0,63}', value) for value in unverified):
+        raise ValueError('Unverified fields must be short labels, not source or logs')
+    listing = ', '.join(names[:10])
+    if len(names) > 10 or len(listing) > 400:
+        listing = listing[:400] + f' [list truncated; {len(names)} total]'
+    lines = ['# Local handoff summary', 'task_id: ' + task_id,
+             'Files (packet allowlist, not a verified changed-file claim): ' + (listing or 'not supplied'),
+             'Mac tests (supplied by controller, not executed here): ' + ('; '.join(mac_tests) or 'unverified'),
+             'Unverified: ' + (', '.join(unverified) or 'acceptance not independently verified'),
+             'Blocker category: ' + category,
+             'Overall verdict: unverified; this summary is not acceptance or remote-write authorization.']
+    return '\n'.join(lines) + '\n'
+
+
+def summary_root(manifest, project_root):
+    if manifest is not None:
+        root = validate_packet(manifest)
+        if project_root and Path(project_root).resolve(strict=True) != root:
+            raise ValueError('Summary project differs from packet')
+        return root
+    if project_root:
+        root = Path(project_root).resolve(strict=True)
+    else:
+        result = subprocess.run(['git', 'rev-parse', '--show-toplevel'], capture_output=True, text=True, timeout=10)
+        if result.returncode:
+            raise ValueError('Need explicit project-root without a packet or verified Git root')
+        root = Path(result.stdout.strip()).resolve(strict=True)
+    if not root.is_dir():
+        raise ValueError('Summary project must be a directory')
+    return root
 
 
 def diff_paths(diff):
@@ -176,20 +348,53 @@ def verify_baseline(root, files):
             raise ValueError('Local baseline changed; reconcile instead of applying')
 
 
-def check(manifest, reply):
-    if manifest.get('schema') != 1:
-        raise ValueError('Unsupported packet schema')
-    root = Path(manifest['project_root'])
-    if root.is_symlink() or root.resolve(strict=True) != root:
-        raise ValueError('Project root changed')
-    tid = manifest['task_id']
+def extract_patch(tid, reply, allow_unhashed=False):
     begin, end = f'BEGIN_PATCH {tid}', f'END_PATCH {tid}'
     lines = reply.split('\n')
-    starts = [i for i, line in enumerate(lines) if line.removesuffix('\r') == begin]
-    ends = [i for i, line in enumerate(lines) if line.removesuffix('\r') == end]
-    if len(starts) != 1 or len(ends) != 1 or starts[0] >= ends[0]:
-        raise ValueError('Need unique complete markers bound to this task')
-    diff = '\n'.join(lines[starts[0]+1:ends[0]]) + '\n'
+    hashed, legacy = [], []
+    start = None
+    starts = ends = 0
+    def has_metadata(block):
+        return any(line.removesuffix('\r').startswith(('PATCH_SHA256', 'PATCH_LINES')) for line in block)
+    for index, raw in enumerate(lines):
+        line = raw.removesuffix('\r')
+        if line == begin:
+            starts += 1
+            if start is not None and has_metadata(lines[start+1:index]):
+                raise ValueError('Truncated hashed patch')
+            start = index
+        elif line == end:
+            ends += 1
+            if start is None:
+                raise ValueError('Unmatched task end marker')
+            block = lines[start+1:index]
+            start = None
+            if not has_metadata(block):
+                legacy.append('\n'.join(block) + '\n')
+                continue
+            if (len(block) < 3 or not re.fullmatch(r'PATCH_SHA256 [0-9a-f]{64}', block[-2].removesuffix('\r'))
+                    or not re.fullmatch(r'PATCH_LINES [0-9]{1,9}', block[-1].removesuffix('\r'))):
+                raise ValueError('Malformed patch integrity metadata')
+            diff = '\n'.join(block[:-2]) + '\n'
+            digest = block[-2].removesuffix('\r').split(' ')[1]
+            count = int(block[-1].removesuffix('\r').split(' ')[1])
+            if hashlib.sha256(diff.encode('utf-8')).hexdigest() != digest or diff.count('\n') != count:
+                raise ValueError('Patch SHA256 or LF line count mismatch')
+            hashed.append(diff)
+        elif start is None and line.startswith(('PATCH_SHA256', 'PATCH_LINES')):
+            raise ValueError('Integrity metadata outside task markers')
+    if start is not None and has_metadata(lines[start+1:]):
+        raise ValueError('Truncated hashed patch')
+    if len(hashed) == 1:
+        return hashed[0]
+    if not hashed and allow_unhashed and len(legacy) == starts == ends == 1:
+        return legacy[0]
+    raise ValueError('Need one complete hashed patch bound to this task; legacy requires allow-unhashed')
+
+
+def check(manifest, reply, allow_unhashed=False):
+    root = validate_packet(manifest)
+    diff = extract_patch(manifest['task_id'], reply, allow_unhashed)
     if len(diff.encode('utf-8')) > MAX_TOTAL or '\0' in diff:
         raise ValueError('Oversized or binary patch')
     touched = diff_paths(diff)
@@ -200,7 +405,7 @@ def check(manifest, reply):
     result = subprocess.run(['git', 'apply', '--check', '--'], input=diff, text=True,
                             cwd=root, capture_output=True, timeout=30)
     if result.returncode:
-        raise ValueError('git apply --check rejected patch: '+result.stderr.strip())
+        raise ValueError('git apply --check rejected patch; preserve the original reply for local inspection')
     verify_baseline(root, files)
     return diff
 
@@ -229,31 +434,69 @@ def write_external_output(path, text, root):
 
 
 
+class SafeParser(argparse.ArgumentParser):
+    def error(self, _message):
+        raise ValueError('Invalid arguments; consult --help')
+
+
 def main():
-    parser = argparse.ArgumentParser(description=__doc__)
-    sub = parser.add_subparsers(dest='command', required=True)
-    create = sub.add_parser('prepare')
-    create.add_argument('--root', required=True)
-    create.add_argument('--file', action='append', required=True)
-    create.add_argument('--task', required=True)
-    create.add_argument('--out', required=True)
-    validate = sub.add_parser('check')
-    validate.add_argument('--packet', required=True)
-    validate.add_argument('--reply', required=True)
-    validate.add_argument('--out', required=True)
-    args = parser.parse_args()
+    command = None
     try:
-        if args.command == 'prepare':
-            manifest = prepare(args.root, args.file, args.task)
-            write_external_output(args.out, json.dumps(manifest, ensure_ascii=False, indent=2)+'\n', manifest['project_root'])
-            print(json.dumps({'task_id': manifest['task_id'], 'packet': args.out}))
+        parser = SafeParser(description=__doc__)
+        sub = parser.add_subparsers(dest='command', required=True)
+        create = sub.add_parser('prepare')
+        create.add_argument('--root', required=True)
+        create.add_argument('--file', action='append', required=True)
+        create.add_argument('--task', required=True)
+        create.add_argument('--out', required=True)
+        create.add_argument('--max-bytes', type=int, default=MAX_PROMPT)
+        create.add_argument('--allow-binary', action='store_true', help='Waive only media extension filtering; content must still be UTF-8 text')
+        validate = sub.add_parser('check')
+        validate.add_argument('--packet', required=True)
+        validate.add_argument('--reply', required=True)
+        validate.add_argument('--out', required=True)
+        validate.add_argument('--allow-unhashed', action='store_true')
+        export = sub.add_parser('render')
+        export.add_argument('--packet', required=True)
+        export.add_argument('--out', required=True)
+        export.add_argument('--max-bytes', type=int, default=MAX_PROMPT)
+        summary = sub.add_parser('handoff-summary')
+        summary.add_argument('--task-id', required=True)
+        summary.add_argument('--packet')
+        summary.add_argument('--project-root')
+        summary.add_argument('--out', required=True)
+        summary.add_argument('--mac-test', action='append', default=[])
+        summary.add_argument('--unverified', action='append', default=[])
+        summary.add_argument('--category', choices=CATEGORIES, default='none')
+        args = parser.parse_args()
+        command = args.command
+        if command == 'prepare':
+            manifest = prepare(args.root, args.file, args.task, args.max_bytes, args.allow_binary)
+            serialized = json.dumps(manifest, ensure_ascii=False, indent=2) + '\n'
+            metrics = prompt_metrics(render(manifest, args.max_bytes))
+            write_external_output(args.out, serialized, manifest['project_root'])
+            result = {'task_id': manifest['task_id'], 'packet': args.out,
+                      'packet_bytes': len(serialized.encode('utf-8')), **metrics}
+        elif command == 'handoff-summary':
+            manifest = json.loads(Path(args.packet).read_text(encoding='utf-8')) if args.packet else None
+            text = handoff_summary(args.task_id, manifest, args.mac_test, args.unverified, args.category)
+            write_external_output(args.out, text, summary_root(manifest, args.project_root))
+            result = {'task_id': args.task_id, 'summary': args.out, 'result': 'summary-only-unverified'}
         else:
-            manifest = json.loads(Path(args.packet).read_text())
-            diff = check(manifest, Path(args.reply).read_bytes().decode('utf-8'))
-            write_external_output(args.out, diff, manifest['project_root'])
-            print(json.dumps({'task_id': manifest['task_id'], 'result': 'checked-only', 'patch': args.out}))
-    except (ValueError, OSError, KeyError, subprocess.TimeoutExpired) as exc:
-        print('BLOCKED: '+str(exc), file=sys.stderr)
+            manifest = json.loads(Path(args.packet).read_text(encoding='utf-8'))
+            if command == 'render':
+                text = render(manifest, args.max_bytes)
+                write_external_output(args.out, text, manifest['project_root'])
+                result = {'task_id': manifest['task_id'], 'prompt': args.out, **prompt_metrics(text)}
+            else:
+                diff = check(manifest, Path(args.reply).read_bytes().decode('utf-8'), args.allow_unhashed)
+                write_external_output(args.out, diff, manifest['project_root'])
+                result = {'task_id': manifest['task_id'], 'result': 'checked-only', 'patch': args.out}
+        print(json.dumps(result, ensure_ascii=False))
+    except (ValueError, OSError, KeyError, TypeError, subprocess.TimeoutExpired) as exc:
+        detail = str(exc) if type(exc) is ValueError else 'Local input unavailable or invalid; preserve existing files'
+        print(json.dumps({'status': 'BLOCKED', 'category': 'integrity_failure' if command == 'check' else 'invalid_input',
+                          'retryable': False, 'attempts': 0, 'read_attempts': 0, 'detail': detail}), file=sys.stderr)
         return 1
     return 0
 

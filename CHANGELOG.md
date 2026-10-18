@@ -2,6 +2,26 @@
 
 作者：elvis。
 
+## 0.1.0.dev3 — 2026-10-17
+
+- prepare/render共用最终UTF-8 prompt默认120KiB预算与max-bytes，prepare写packet之前阻断过限；分别报告prompt/packet字节和明确粗估token。
+- 生产prompt要求补丁外最多10行、不复述任务或贴完整日志；仍禁止云端项目测试冒充Mac验收。
+- 可选handoff-summary仅汇总显式身份/白名单/测试状态计数，不执行测试、推断通过或写云端；最多15行、私有项目外输出，不包含源码/diff/secret。
+- 媒体后缀默认拦截，allow-binary只放宽扩展名；实际二进制、明确媒体data URL及有限解码后命中magic的块仍拒绝，不承诺任意编码检测。
+- main/合法格式export共享task累计两次提交上限，unknown继续pending，不能换ID绕过；只读次数另计。
+- 独立实现Review发现后补回归修复：rebind归档task禁止重放、同目标不重置次数；finish/reconcile恢复累计计数；嵌套native/registry形状与创建身份安全阻断；ftyp需有效容器长度，避免误伤普通源码。
+- 保留全部路径、基线、原字节与未知结果保护，未发布/安装，真实远端恢复和原生request retry/collect边界不变。
+- 2026-10-18批准将显式create的原生caller-key要求改为本地最多一次提交：ensure取消隐式创建；create默认零落盘dry-run，仅用户选择目标后confirm。先持久reservation再一次native调用，回执candidate完整核验后才bound；未启动/丢失/损坏/核验失败不重提，保留旧creating与历史task保护。静态契约来自本机Orca 1.4.227公开terminal create；没有原生去重，不扩大为真实远端验收，VERSION仍为dev3。
+
+## 0.1.0.dev2 — 2026-10-17
+
+- 将Orca启动失败、非零、超时和无效响应分开；仅证明未启动才not_sent，远端未知仍保留intent；回执白名单与脱敏摘要取代完整响应。
+- 只读查询/退避移出registry锁，重载后校验本owner快照，避免旧回执和整库覆盖；新增保守reconcile及用户确认的显式rebind，保留扁平history。
+- 默认校验原字节PATCH_SHA256/PATCH_LINES，忽略无元数据的提示样板，但损坏/截断/重复hashed产物阻断；旧回复仅显式allow-unhashed。
+- 增加安全render及prepare/render秘密扫描；保留UTF-8/CR/CRLF、白名单、基线、路径和真实Git检查。
+- 已集成绑定消息/任务计数基础保护及生产prompt短回复约束；prepare前置预算、媒体门禁和handoff摘要由后续dev3完成。
+- 官方远端未送达/request retry契约缺失，相关推断/原生重试保持关闭，collect延后；未执行真实云端验收、发布或安装。
+
 ## 0.1.0.dev1 — 2026-10-15
 
 - 修复 UTF-8 补丁中的非 LF 字符被误当结构换行：换页符、分隔符、裸 CR 等在 hunk 内容中保持原字节。

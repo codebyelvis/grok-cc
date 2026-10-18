@@ -2,7 +2,7 @@
 
 [简体中文](README.md) | [English](README.en.md)
 
-Author: elvis. Version: `0.1.0.dev1`, a development version with no formal release yet.
+Author: elvis. Version: `0.1.0.dev3`, a development version with no formal release yet.
 
 Delegate local Mac development tasks to Claude Code on the Grok Bot cloud computer through Orca. Recover the patch, then check, review, apply and test it on the Mac.
 
@@ -33,11 +33,14 @@ Claudex: /grok-cc Fix a specific issue in the current project and verify it on t
 Provide the actual task, allowed files and acceptance criteria. The controller follows [SKILL.md](SKILL.md); example placeholders are not dispatchable tasks. The current Skill instructions and detailed references are in Chinese.
 
 - One real Mac conversation owns one cloud CC terminal. Different conversations do not share terminals.
+- Terminal creation requires an explicit user choice. `ensure` verifies an existing binding. Without a binding, first show the read-only plan with `create --project <full cloud worktree ID>`; add `--confirm` only after the user chooses that target. A durable local reservation allows at most one submission per intent in the same registry. There is no native caller-key deduplication, and unknown outcomes never trigger another create.
 - Busy, offline, changed identity or unknown send outcomes preserve the existing binding. Do not switch terminals or resend blindly.
-- Repeating the same task/message/text resumes its stored receipt. Changing IDs does not authorize duplicate dispatch.
+- Repeating accepted/uncertain task/message/text resumes its record. Only positively not-started sends allow an explicit same-text retry; a task has at most two submissions including legitimate format exports. Changing IDs cannot bypass this.
 - Preserve input drafts. Only verified exact startup hints are recognized before the first task; arbitrary `Try` text is not accepted.
-- Require a complete task-marked patch and the original packet's file, baseline and path checks before applying. `input_accepted`, `tui-idle` and a screenshot are not acceptance evidence.
+- Require complete task framing, PATCH_SHA256/PATCH_LINES matching original bytes and the original packet's file/baseline/path checks. Legacy output requires explicit `--allow-unhashed`. `input_accepted`, `tui-idle` and screenshots are not acceptance evidence.
 - `finish` releases the task slot while preserving its binding. It returns `project_pass=false` and does not establish project completion.
+
+Prepare/render share a default 120 KiB outbound budget and credential scanning; start with a minimal allowlist. Render omits the Mac root and baseline hashes and requests at most ten conclusion lines outside the patch. Optional handoff-summary reports only supplied evidence; missing evidence stays unverified and the helper never writes remotely.
 
 Details: [session binding](references/session-binding.md), [final patch requests and blocker classification](references/final-patch-prompt.md).
 
@@ -86,7 +89,7 @@ GitHub CI runs the same checks on macOS/Linux with Python 3.11/3.13. It does not
 
 The local source repository, [GitHub repository](https://github.com/codebyelvis/grok-cc) and active Skill installation have separate acceptance states. Use the actual reviewed Git commit as the installation source after publication, and verify the push and local installation separately. Repository preparation does not automatically update every open conversation.
 
-[Installation documentation](docs/installation.md) reuses the existing official `skill-installer` for isolated staging rather than introducing a second installer. Verify the published revision, installation preimage and concurrent drift before an authorized fixed-payload update. Preserve entry links and runtime state. There is no automatic update, rebind or cleanup command.
+[Installation documentation](docs/installation.md) reuses the existing official `skill-installer` for isolated staging rather than introducing a second installer. Verify the published revision, installation preimage and concurrent drift before an authorized fixed-payload update. Preserve entry links and runtime state. There is no automatic update/rebind or cleanup. Explicit rebind requires user-confirmed identity and no active/uncertain task.
 
 ## License
 

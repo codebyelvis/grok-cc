@@ -28,7 +28,10 @@ class PacketTests(unittest.TestCase):
         self.tmp.cleanup()
     def wrap(self, diff=None, task_id=None):
         tid=task_id or self.manifest['task_id']
-        return f'BEGIN_PATCH {tid}\n{diff or self.diff}END_PATCH {tid}\n'
+        diff = diff or self.diff
+        digest = hashlib.sha256(diff.encode('utf-8')).hexdigest()
+        count = diff.count('\n')
+        return f'BEGIN_PATCH {tid}\n{diff}PATCH_SHA256 {digest}\nPATCH_LINES {count}\nEND_PATCH {tid}\n'
     def test_snapshot_carries_actual_bytes_and_project_root(self):
         self.assertEqual(self.manifest['project_root'], str(self.root.resolve()))
         self.assertEqual(self.manifest['files']['a.py']['content'], 'value = 1\n')
@@ -67,12 +70,12 @@ class PacketTests(unittest.TestCase):
         manifest=packet.prepare(self.root,['folder/a.py'],'task')
         (folder/'a.py').unlink();folder.rmdir()
         folder.symlink_to(self.root)
-        reply=f"BEGIN_PATCH {manifest['task_id']}\n{self.diff.replace('a.py','folder/a.py')}END_PATCH {manifest['task_id']}\n"
+        reply=self.wrap(self.diff.replace('a.py','folder/a.py'), manifest['task_id'])
         with self.assertRaises(ValueError):packet.check(manifest,reply)
     def test_new_file_is_explicit_and_collision_is_denied(self):
         manifest=packet.prepare(self.root,['new.py'],'create')
         diff='--- /dev/null\n+++ b/new.py\n@@ -0,0 +1 @@\n+value = 2\n'
-        reply=f"BEGIN_PATCH {manifest['task_id']}\n{diff}END_PATCH {manifest['task_id']}\n"
+        reply=self.wrap(diff, manifest['task_id'])
         self.assertEqual(packet.check(manifest,reply),diff)
         self.assertFalse((self.root/'new.py').exists())
         (self.root/'new.py').write_text('user work\n')
@@ -93,7 +96,7 @@ class PacketTests(unittest.TestCase):
         manifest=packet.prepare(self.root,['a.py'],'task')
         tid=manifest['task_id']
         diff='--- a/a.py\n+++ b/a.py\n@@ -1,3 +1,3 @@\n-value = 1\n+value = 2\n line0 = 0\n line1 = 1\n'
-        reply=f'BEGIN_PATCH {tid}\n{diff}END_PATCH {tid}\n'
+        reply=self.wrap(diff, tid)
         real_git=shutil.which('git')
         wrappers=self.root/'wrappers';wrappers.mkdir()
         wrapper=wrappers/'git'
@@ -194,8 +197,10 @@ class PacketTests(unittest.TestCase):
                     native=subprocess.run(['git','apply','--check','--'],input=diff,cwd=self.root,capture_output=True)
                     self.assertEqual(native.returncode,0,native.stderr)
                     reply_path=external/(name+'.reply')
+                    metadata=(b'PATCH_SHA256 '+hashlib.sha256(diff).hexdigest().encode()+framing
+                              +b'PATCH_LINES '+str(diff.count(b'\n')).encode()+framing)
                     reply_path.write_bytes(('BEGIN_PATCH '+manifest['task_id']).encode()+framing+diff
-                                           +('END_PATCH '+manifest['task_id']).encode()+framing)
+                                           +metadata+('END_PATCH '+manifest['task_id']).encode()+framing)
                     output_path=external/(name+'.patch')
                     checked=subprocess.run([sys.executable,str(SOURCE),'check','--packet',str(manifest_path),
                                             '--reply',str(reply_path),'--out',str(output_path)],capture_output=True)
@@ -218,5 +223,151 @@ class PacketTests(unittest.TestCase):
         self.assertEqual((self.root/'a.py').read_bytes(),b'value = 1\n')
         subprocess.run(['git','apply','--'],input=checked.encode('utf-8'),cwd=self.root,check=True)
         self.assertEqual((self.root/'a.py').read_bytes(),after.encode('utf-8'))
+
+    def test_echo_template_does_not_hide_authentic_hashed_patch(self):
+        tid=self.manifest['task_id']
+        echo=f'BEGIN_PATCH {tid}\n<standard diff template>\nEND_PATCH {tid}\n'
+        self.assertEqual(packet.check(self.manifest,echo+self.wrap()),self.diff)
+    def test_bad_hash_count_truncation_and_damaged_candidate_block(self):
+        valid=self.wrap()
+        digest=hashlib.sha256(self.diff.encode()).hexdigest()
+        bad_hash=valid.replace(digest,'0'*64)
+        bad_count=valid.replace('PATCH_LINES 5','PATCH_LINES 999')
+        for reply in (bad_hash,bad_count,valid[:-12],bad_hash+valid,valid+valid):
+            with self.assertRaises(ValueError):packet.check(self.manifest,reply)
+        with self.assertRaises(ValueError):packet.check(self.manifest,bad_hash,allow_unhashed=True)
+    def test_legacy_is_opt_in_and_cannot_downgrade_corruption(self):
+        tid=self.manifest['task_id']
+        legacy=f'BEGIN_PATCH {tid}\n{self.diff}END_PATCH {tid}\n'
+        with self.assertRaises(ValueError):packet.check(self.manifest,legacy)
+        self.assertEqual(packet.check(self.manifest,legacy,allow_unhashed=True),self.diff)
+        with self.assertRaises(ValueError):packet.check(self.manifest,legacy+legacy,allow_unhashed=True)
+    def test_render_omits_root_and_baseline_preserves_snapshot_and_bounds(self):
+        (self.root/'a.py').write_text('local edit\n')
+        text=packet.render(self.manifest)
+        self.assertIn('value = 1\n',text)
+        self.assertNotIn(str(self.root.resolve()),text)
+        self.assertNotIn(self.manifest['files']['a.py']['sha256'],text)
+        self.assertNotIn('BEGIN_PATCH '+self.manifest['task_id'],text)
+        self.assertNotIn('END_PATCH '+self.manifest['task_id'],text)
+        size=len(text.encode('utf-8'))
+        self.assertEqual(packet.render(self.manifest,max_bytes=size),text)
+        with self.assertRaises(ValueError):packet.render(self.manifest,max_bytes=size-1)
+        self.assertEqual((self.root/'a.py').read_text(),'local edit\n')
+    def test_secret_scan_prepare_and_tampered_render_without_value_leak(self):
+        tokens=['AKIA'+'A'*16,'ghp_'+'A'*36,'github_pat_'+'A'*30,'sk-'+'A'*30,
+                'xoxb-'+'1'*20,'tskey-'+'A'*25,'-----BEGIN '+'PRIVATE KEY-----']
+        for token in tokens:
+            (self.root/'a.py').write_text('first\n'+token+'\n')
+            with self.assertRaises(ValueError) as caught:packet.prepare(self.root,['a.py'],'task')
+            self.assertNotIn(token,str(caught.exception))
+            self.assertIn('a.py',str(caught.exception));self.assertIn('2',str(caught.exception))
+            changed=json.loads(json.dumps(self.manifest));changed['task']=token
+            with self.assertRaises(ValueError) as caught:packet.render(changed)
+            self.assertNotIn(token,str(caught.exception))
+        (self.root/'a.py').write_text('prefixes ghp_ sk- tskey- and regex [A-Z]{16}\n')
+        packet.prepare(self.root,['a.py'],'safe task')
+    def test_secret_in_path_and_task_do_not_escape_diagnostics(self):
+        token='ghp_'+'A'*36
+        for names,task in ((['a.py'],token),([token+'.py'],'task')):
+            with self.assertRaises(ValueError) as caught:packet.prepare(self.root,names,task)
+            self.assertNotIn(token,str(caught.exception))
+    def test_render_cli_uses_private_external_output_and_no_overwrite(self):
+        with tempfile.TemporaryDirectory() as external:
+            folder=Path(external).resolve();manifest=folder/'packet.json';out=folder/'prompt.txt'
+            manifest.write_text(json.dumps(self.manifest),encoding='utf-8')
+            args=[sys.executable,str(SOURCE),'render','--packet',str(manifest),'--out',str(out)]
+            result=subprocess.run(args,capture_output=True)
+            self.assertEqual(result.returncode,0,result.stderr)
+            metadata=json.loads(result.stdout)
+            self.assertEqual(metadata['prompt_bytes'],len(out.read_bytes()))
+            self.assertEqual(out.stat().st_mode&0o777,0o600)
+            self.assertNotEqual(subprocess.run(args,capture_output=True).returncode,0)
+            self.assertEqual((self.root/'a.py').read_text(),'value = 1\n')
+    def test_render_refuses_inconsistent_snapshot(self):
+        changed=json.loads(json.dumps(self.manifest));changed['files']['a.py']['content']='changed'
+        with self.assertRaises(ValueError):packet.render(changed)
+
+    def test_prepare_frontloads_same_utf8_budget_as_render(self):
+        text=packet.render(self.manifest);size=len(text.encode('utf-8'))
+        prepared=packet.prepare(self.root,['a.py'],'Set value to 2',max_bytes=size)
+        self.assertEqual(len(packet.render(prepared,max_bytes=size).encode('utf-8')),size)
+        with self.assertRaises(ValueError):packet.prepare(self.root,['a.py'],'Set value to 2',max_bytes=size-1)
+        (self.root/'a.py').write_text('汉'*42000,encoding='utf-8')
+        with self.assertRaises(ValueError):packet.prepare(self.root,['a.py'],'task')
+        prepared=packet.prepare(self.root,['a.py'],'task',max_bytes=200000)
+        self.assertGreater(len(packet.render(prepared,max_bytes=200000).encode()),120*1024)
+    def test_prepare_cli_reports_metrics_and_overbudget_writes_nothing(self):
+        with tempfile.TemporaryDirectory() as external:
+            out=Path(external).resolve()/'packet.json'
+            args=[sys.executable,str(SOURCE),'prepare','--root',str(self.root),'--file','a.py',
+                  '--task','task','--out',str(out)]
+            failed=subprocess.run([*args,'--max-bytes','1'],capture_output=True)
+            self.assertNotEqual(failed.returncode,0);self.assertFalse(out.exists())
+            self.assertIn('reduce',json.loads(failed.stderr)['detail'])
+            result=subprocess.run(args,capture_output=True)
+            self.assertEqual(result.returncode,0,result.stderr)
+            metrics=json.loads(result.stdout)
+            prompt=packet.render(json.loads(out.read_text(encoding='utf-8')))
+            self.assertEqual(metrics['prompt_bytes'],len(prompt.encode()))
+            self.assertEqual(metrics['token_estimate'],(metrics['prompt_bytes']+3)//4)
+            self.assertEqual(metrics['packet_bytes'],len(out.read_bytes()))
+            self.assertIn('at most 10 lines',prompt);self.assertIn('do not repeat the task',prompt)
+    def test_media_override_is_only_an_extension_override(self):
+        (self.root/'diagram.png').write_text('safe UTF-8 text\n')
+        with self.assertRaises(ValueError):packet.prepare(self.root,['diagram.png'],'task')
+        packet.prepare(self.root,['diagram.png'],'task',allow_binary=True)
+        (self.root/'diagram.png').write_bytes(b'\x89PNG\r\n\x1a\n')
+        with self.assertRaises(ValueError):packet.prepare(self.root,['diagram.png'],'task',allow_binary=True)
+        for raw in (b'%PDF-1.7\ntext',b'<svg viewBox="0 0 10 10"></svg>'):
+            (self.root/'a.py').write_bytes(raw)
+            with self.assertRaises(ValueError):packet.prepare(self.root,['a.py'],'task',allow_binary=True)
+    def test_known_encoded_media_rejected_without_flagging_ordinary_text(self):
+        import base64
+        encoded=base64.b64encode(b'\x89PNG\r\n\x1a\n'+b'fake-payload'*20).decode()
+        for content in (encoded,'data:'+'image/png;base64,'+encoded):
+            (self.root/'a.py').write_text(content)
+            with self.assertRaises(ValueError):packet.prepare(self.root,['a.py'],'task')
+            changed=json.loads(json.dumps(self.manifest));changed['task']=content
+            with self.assertRaises(ValueError):packet.render(changed)
+        (self.root/'a.py').write_text('A'*2000+'\nregex = "[A-Za-z0-9+/]+"\n')
+        packet.prepare(self.root,['a.py'],'safe plain text')
+    def test_summary_explicit_evidence_is_short_and_not_a_verdict(self):
+        summary=packet.handoff_summary(self.manifest['task_id'],self.manifest,
+            mac_tests=['unit:pass:4:0'],unverified=['cloud'],category='none')
+        self.assertLessEqual(len(summary.split('\n'))-1,15)
+        self.assertIn('a.py',summary);self.assertIn('unit:pass:4:0',summary)
+        self.assertIn('supplied',summary);self.assertNotIn('value =',summary)
+        self.assertNotIn(str(self.root.resolve()),summary)
+        self.assertIn('unverified',packet.handoff_summary(self.manifest['task_id']))
+        for fields in ({'mac_tests':['unit:pass:0:2']},{'unverified':['source\n+diff']},
+                       {'mac_tests':['ghp_'+'A'*36+':pass:1:0']}):
+            with self.assertRaises(ValueError):packet.handoff_summary(self.manifest['task_id'],**fields)
+        with self.assertRaises(ValueError):packet.handoff_summary('other',self.manifest)
+    def test_summary_cli_external_private_no_overwrite_and_no_project_write(self):
+        with tempfile.TemporaryDirectory() as external:
+            out=Path(external).resolve()/'summary.md'
+            args=[sys.executable,str(SOURCE),'handoff-summary','--task-id',self.manifest['task_id'],
+                  '--project-root',str(self.root),'--out',str(out)]
+            result=subprocess.run(args,capture_output=True)
+            self.assertEqual(result.returncode,0,result.stderr)
+            self.assertIn('unverified',out.read_text());self.assertEqual(out.stat().st_mode&0o777,0o600)
+            self.assertNotEqual(subprocess.run(args,capture_output=True).returncode,0)
+            inside=[*args];inside[-1]=str(self.root/'summary.md')
+            self.assertNotEqual(subprocess.run(inside,capture_output=True).returncode,0)
+            self.assertFalse((self.root/'summary.md').exists())
+
+    def test_ftype_source_is_not_a_media_container(self):
+        import base64
+        source='def ftype(path):\n    return path.suffix\n'
+        compile(source,'ftype.py','exec')
+        (self.root/'a.py').write_text(source)
+        self.assertFalse(packet.media_magic(source.encode()))
+        prepared=packet.prepare(self.root,['a.py'],'adjust docstring')
+        self.assertIn(source,packet.render(prepared))
+        container=b'\x00\x00\x00\x18ftypisom\x00\x00\x02\x00isomiso2'
+        self.assertTrue(packet.media_magic(container))
+        (self.root/'a.py').write_text(base64.b64encode(container).decode())
+        with self.assertRaises(ValueError):packet.prepare(self.root,['a.py'],'task',allow_binary=True)
 
 if __name__=='__main__':unittest.main()
