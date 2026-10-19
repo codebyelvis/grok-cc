@@ -61,4 +61,15 @@
 
 源码验收阶段未获Git暂存/提交授权，因此先将成果保留在原worktree。2026-10-18用户明确授权“该提交提交”，本阶段将已验收的14项修改和12项治理文件收敛为原分支上的本地提交；实际结果以Git提交记录为准，不包含主工作区的两份既有需求草稿，也不包含项目外私有证据。
 
-推送、源码发布和active Skill安装仍待对应阶段授权；发布后才进入另行批准的安装及真实远端验收。两change保持active并记录此生命周期边界，不将本地提交扩成已发布/安装/E2E，也不为归档删除待发布材料。
+上述为源码提交阶段的边界。其后用户明确要求更新共享本地安装，已从固定提交`4e794a211f6c6044170b54d2b7c80ad4b5f0af34`离线同步8文件；active与两入口匹配，112项安装版测试和独立安装验收PASS，报告SHA256 `2878c1e3b7c92c167d4fe5e17c3a5a3d8610131dc57ec939f56e1f9b4faad78a`。旧版备份保留，临时staging已清理，未改入口/registry/原生配置。该次明确本地更新授权不改变默认发布顺序；推送/发布及真实远端E2E仍未执行，两change继续active等待对应阶段授权。
+
+## 6. 2026-10-19 repository-local archive and distillation
+
+Gate 0：本轮为仓库内静态归档/项目学习的 Direct Change，已读 Router、direct-change-rule、project-learning-closeout、learning-candidate-pipeline 和 handoff-new-window；不改变现有两份 OpenSpec 合同，不新增 proposal/实现计划或运行行为。文档编辑风险低，历史 integrity/false-PASS 经验仍保留独立学习与单独 Final Review；本阶段只使用 verification-before-completion 方法，不重做实现 TDD/Preflight。已有归档及本地提交授权内继续校验和审核，无需重复确认，发布等边界保持原状。
+
+- [x] 用户明确要求归档并蒸馏到本仓库。归档为静态会话与接力摘要，未移动OpenSpec change或重写基准spec；原合同/旧Review保持历史。
+- [x] 已创建工程不变量、ADR、仓库内会话归档和项目学习卡；AGENTS/双语README提供入口，CONTEXT仅补术语。机制复用既有回归，不新增安装器、状态框架或运行行为。
+- [x] 112项现有回归、文档原样校验正反例、51链接/23回归入口及范围/来源/敏感审查通过；独立学习Review PASS后由主控提升3张项目学习卡。Review报告SHA256 `42878bda13fa8d7f8606a09878e49e3c613a43f2256137ab37e91e561cc42b47`，卡片保留来源与实际签收边界。
+- [x] 学习提升后的新鲜最终验证通过：112项、两份strict、diff及文档正反例；验证清单SHA256 `48653acc57269e9e8e828562524616ab9922b92baeb6db90d78545cff5fa14ad`。不同实例的单独Final Review PASS、无可操作发现，报告SHA256 `01999a23712b9d2c08208db8c1241d6d70bbb5e7239003a812c41913e43cb196`；主控核对实际文件和证据后签收本地归档/学习范围，10份文档收敛本地提交，实际提交身份以Git记录为准。运行载荷未改，主工作区两份既有草稿保留，未发布/真实远端的边界不变。
+
+详细当前快照、未完成事项负责人和恢复条件见[会话归档](../../../docs/handoffs/2026-10-19-local-closeout.md)。本轮仅本地归档与提交，推送/发布、主分支整合和真实远端任务仍须对应授权。

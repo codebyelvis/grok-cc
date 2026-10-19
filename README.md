@@ -44,6 +44,8 @@ prepare/render共用默认120KiB外发预算和secret扫描，先小白名单起
 
 详细规则：[会话绑定](references/session-binding.md)、[最终补丁请求与阻碍分类](references/final-patch-prompt.md)。
 
+维护与续接：[工程不变量及回归入口](docs/engineering/engineering-invariants.md)、[本地最多一次提交决策](docs/adr/0001-local-at-most-once-create.md)、[2026-10-19 会话归档](docs/handoffs/2026-10-19-local-closeout.md)。归档区分已提交、已安装与未发布/未做真实远端验收的状态。
+
 ## 工程结构
 
 ```text

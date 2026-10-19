@@ -44,6 +44,8 @@ Prepare/render share a default 120 KiB outbound budget and credential scanning; 
 
 Details: [session binding](references/session-binding.md), [final patch requests and blocker classification](references/final-patch-prompt.md).
 
+Maintenance references (Chinese): [engineering invariants and regression map](docs/engineering/engineering-invariants.md), [local at-most-once creation decision](docs/adr/0001-local-at-most-once-create.md), and [2026-10-19 session archive](docs/handoffs/2026-10-19-local-closeout.md). The archive distinguishes committed source, installed payload, pending publication and unverified real-remote acceptance.
+
 ## Repository layout
 
 ```text
