@@ -1,8 +1,26 @@
-# Orca 1.4.229 local activation and source history
+# Orca 1.4.229 master integration and connectivity checkpoint
 
 作者：elvis。
 
-## Current authorized follow-up
+## Current checkpoint
+
+Gate0 continues the approved OpenSpec candidate and the user's explicit local Git authorization with no new branch. Integration-readiness FULL_PREFLIGHT PASS by independent Codex `/root/orca229_final_review`, control-plane-high, governed-review-evidence only; finding_completeness=true, no actionable finding. Frozen plan SHA58a6d8a67bb2cefd7fe6560ba81d62920c91bb4c5757e8a3898b675d18cf2f81 and preflight-v2 SHA321018488a21156efdf9ae00ae2a9d014c8715452774e9ea1e1bf3d3bcfd4685 accepted by controller.
+
+Executed candidate commit `4f25828da6a625f449e0a5952ff46f12891deca1` with exactly16 files on parent `4ea6ddb8307bbb99ee6ad2efc4833094d59b4c6a`; original master fast-forwarded from350ec30 to that commit, preserving both prerequisite commits. No branch was created. Original master and detached source both had clean tracked state after the fast-forward; original-root's three pre-existing `docs/review:requirement/` files retained exact bytes, mode and mtime. Other branch refs unchanged; no push, reset/clean, branch or worktree removal.
+
+Fresh main-root evidence: `make check`129 PASS (6.198s), manifest/version/two help smokes PASS, all three active OpenSpec strict validations valid. Source/main/shared installation eight-file hashes match. Real registry hash still matches the installation-before hash; the old owner remains creating without native operationId/candidate/handle. This integration does not recover it.
+
+User-relayed Bot report: samples14:09:09/14:09:19 show watchdog226051 waiting normally for sleep300, state last updated14:06:44. Its logs report TERM14:05:20, bootstrap14:06:20 and Tailscale online14:06:44. Mac independently verified at14:10: Tailscale peer online, TCP6768 connected, Orca runtime and graph ready on saved runtime eaf17dbf-eedb-4386-8e95-b9dfdf4f99c2; exact hello worktree query succeeded and complete terminal list returned0. This verifies current connectivity/metadata access, not continuous availability or real CC round-trip. The13:25–14:05 lack of progress and freeze trigger remain unproven. No manual service/network/pairing/config/registry or CC mutation occurred; controller Bot-model requests remain0.
+
+Desktop visual check could not run: Computer Use bootstrap reported `sky requires node_repl; configure NODE_REPL_TRUSTED_SERVICES`. No GUI action or configuration workaround was performed. Actual desktop file-panel refresh/display is unverified; Mac CLI recovery above is the available evidence.
+
+Independent integration/closeout acceptance: PASS by Codex `/root/orca229_final_review`, independent-reviewer/control-plane-high, independent from author/executor, governed-review-evidence only; no actionable finding. Reviewer verified actual C1 parent/16 blobs, master fast-forward/dependencies/refs, original three files, full129-test log/hash, eight-file parity and the exact three-document diff; independently reran all three strict validations and diff check. Controller accepts this bounded local Git evidence. No cloud E2E, sustained stability or GUI PASS is implied.
+
+Local closeout is ready: only existing status/plan/tasks metadata is updated on original master for the authorized docs commit. Private execution receipts and full main-check log are in `~/.local/share/grok-cc-integration-prep/20261019-master-y_1kk270/`. On resume inspect actual master HEAD and its paths before repeating any commit: the final docs action, once executed, has parent4f25828 and only these three canonical paths; its final receipt records actual HEAD and clean-state checks after execution. Detached candidate remains clean at4f25828; original master is now the integration source. No new runtime installation is needed because all eight payload hashes already match.
+
+Remaining task: verify the desktop's refreshed view and, under appropriate original-owner/creation authority, a genuine CC task; sustained cloud availability, the old no-ID pending and historical probe effects remain unverified. No further Bot polling or infrastructure change is authorized by this checkpoint. Keep the OpenSpec change active for the outstanding publication/real-acceptance lifecycle.
+
+## Local activation history
 
 Gate 0: approved continuation of the same OpenSpec candidate; user explicitly approved installation from this local unpublished candidate plus read-only cloud/legacy checks on 2026-10-19. Existing source/design/final Review reused; no new implementation or runtime behavior design. Evidence profile remains standard with controlled activation, frozen hashes, private preimage, drift checks, installed regression, independent installation-readiness/acceptance Review and verification-before-completion. No repeat user confirmation is required for these authorized steps.
 

@@ -20,7 +20,7 @@ Source artifact is prepared for review/integration; this is not whole-task compl
 ## Separate future authority
 - [x] Inspect retained16-file candidate, exact ancestry and original-root residue; rerun make check129 PASS, strict validation and diff check; prepare a scoped local-branch commit proposal.
 - [x] Obtain explicit local staging/commit scope; user selected no new branch, integration into existing master, preserving both prerequisite commits and original-root files.
-- [ ] Independently preflight the detached16-file commit and master fast-forward, then execute only that authorized Git scope.
-- [ ] Verify original-root preservation, exact commit contents, installed parity and main-root checks; obtain independent integration acceptance.
-- [ ] Await the single cloud-side read-only report to distinguish VM/Tailscale/Orca failure; current Mac evidence confirms peer offline and connection timeouts only.
+- [x] Independently preflight the detached16-file commit and master fast-forward, then execute only that authorized Git scope (FULL_PREFLIGHT PASS; candidate4f25828, original master fast-forwarded, no new branch).
+- [x] Verify original-root preservation, exact commit contents, installed parity and main-root checks; obtain independent integration acceptance (Codex `/root/orca229_final_review` PASS, no actionable finding; exact three-document closeout ready).
+- [x] Obtain targeted cloud-side read-only reports and independently retest from Mac: normal watchdog sleep/14:06 recovery reported; at14:10 peer online, TCP6768 connected, Orca/graph ready, hello query succeeds and complete terminal list0. Freeze trigger, continuous availability and real CC usage remain unverified; desktop visual tool unavailable.
 - [ ] Publication and genuine cloud task acceptance remain outside this local integration/read-only phase. Keep the change active; do not equate installation or Git success with cloud availability or completed legacy recovery.
