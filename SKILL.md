@@ -35,7 +35,7 @@ orca status --environment 'Grok Bot' --json
 orca terminal list --environment 'Grok Bot' --json
 ```
 
-同一本地会话持续使用一个绑定CC，不扫描空闲池或直接terminal create/send绕过helper。**不自动新建终端**；任务授权、时间压力和“自行推进”都不能代替用户对具体创建目标的明确选择。
+同一本地会话持续使用一个绑定CC，不扫描空闲池或直接agent launch/terminal create/send绕过helper。**不自动新建终端**；任务授权、时间压力和“自行推进”都不能代替用户对具体创建目标的明确选择。
 
 - Codex使用当前CODEX_THREAD_ID，helper可读取；不能以外部UUID覆盖。
 - Claudex本次原生渲染ID为`${CLAUDE_SESSION_ID}`，须作为`--session-id`传入。它不是shell环境变量；未取到真实ID或仍是占位符即停止，不用PID/目录/随机值替代。
@@ -53,7 +53,9 @@ python3 <skill-dir>/scripts/session_binding.py create <同一组会话与目标�
 
 `--project`是云端完整worktree ID，`--project-root`仍是Mac根目录；若同时传worktree，两者必须相同。dry-run不创建终端、状态目录、lock或intent。用户已明确批准该目标的新建后，才可对同一命令增加`--confirm`；既有bound的换绑则按reference的rebind门禁执行，无绑定不认领legacy终端。暂时不可达先等一至两分钟核查原操作，不据此新建。
 
-确认后先持久保存本地reservation，再最多一次原生create；回执先保存为candidate，经完整身份、auto、空输入及空闲核验后才绑定。只保证同一保留registry下本helper每intent最多一次提交，没有原生caller-key去重。未启动、超时、丢失/损坏回执或核验失败都保留create_unverified，不再提交；有精确candidate时重复confirm仅可继续只读核验，无candidate时不猜归属。旧creating也不能重置或换state-dir绕过。
+确认后先持久保存reservation，再一次`agent launch --agent claude`，不带prompt、模型或设置参数；执行端须报告Orca≥1.4.229及所需能力。Orca设置决定聊天或终端；聊天页保持pending，不改设置强制转终端。先保存原生operationId和精确handle，再由完整清单取得incarnation，经Claude身份、auto、空输入及空闲核验后才绑定。
+
+未知结果保留creating；重复confirm只继续核验已保存的精确回执，不自动启动或重放。仅新协议保存了有效原生operationId及明确retrySafe证据时，才可按[显式启动重放](references/session-binding.md#显式启动重放)在原目标、runtime、可执行文件和目录，显式重放同ID一次。无ID的旧pending保持未知；不能借升级、空清单、随机ID或新state-dir恢复创建机会。启动重放与发送`--retry-request`是两个不同协议。
 
 所有wait/read只针对返回的handle/runtime/incarnation；发送前保存cursor和intent，receipt仅保留白名单字段。保留真实草稿、未知屏幕、非auto、身份漂移、creating/sending未知结果；不清空输入、不自动换绑、开窗、重启网络或删registry。
 

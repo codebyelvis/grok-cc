@@ -10,6 +10,7 @@ import json
 import os
 from pathlib import Path
 import re
+import shutil
 import stat
 import subprocess
 import sys
@@ -19,33 +20,117 @@ import uuid
 
 class Blocked(ValueError):
     """Only constant, local diagnostics may cross the CLI boundary."""
-    def __init__(self, category, detail, retryable=False):
+    def __init__(self, category, detail, retryable=False, diagnostic=None, launch=None):
         super().__init__(detail)
         self.category = category
         self.detail = detail
         self.retryable = retryable
         self.attempts = self.read_attempts = 0
+        self.diagnostic = diagnostic or {}
+        self.launch = launch or {}
 
     def result(self):
-        return {'status': 'BLOCKED', 'category': self.category, 'retryable': self.retryable,
+        return ({'status': 'BLOCKED', 'category': self.category, 'retryable': self.retryable,
                 'attempts': self.attempts, 'read_attempts': self.read_attempts, 'detail': self.detail}
+                | ({'diagnostic': self.diagnostic} if self.diagnostic else {})
+                | ({'launch': self.launch} if self.launch else {}))
 
 
 TRANSIENT_READ_CODES = frozenset(('remote_runtime_unavailable', 'transport_unavailable',
                                   'connection_reset', 'connection_refused'))
+NATIVE_CODES = TRANSIENT_READ_CODES | frozenset(('agent_session_operation_unknown',
+    'agent_session_operation_expired', 'incompatible_runtime', 'invalid_argument',
+    'runtime_error', 'runtime_access_denied', 'agent_launch_tab_closed'))
+NATIVE_KINDS = frozenset(('launch', 'timeout', 'nonzero', 'invalid_json', 'invalid_envelope', 'invalid_result'))
+LAUNCH_CAPABILITIES = frozenset(('agent.launch.v2', 'agent.launch.replay-required.v1',
+                                'agent.launch.local-presentation.v1'))
+
+
+def _operation_id(value):
+    return isinstance(value, str) and re.fullmatch(r'\d{13}-[0-9a-f]{32}', value, re.ASCII) is not None
+
+
+def _unknown_launch(code, data):
+    if (code == 'agent_session_operation_unknown' and isinstance(data, dict)
+            and data.get('launchOutcome') == 'unknown' and data.get('retrySafe') is True
+            and _operation_id(data.get('operationId'))):
+        return {k: data[k] for k in ('launchOutcome', 'retrySafe', 'operationId')}
+    return {}
+
+
+def _diagnostic(exc):
+    diagnostic = {'kind': exc.kind if isinstance(exc, NativeFailure) and isinstance(exc.kind, str)
+                  and exc.kind in NATIVE_KINDS
+                  else 'invalid_result', 'started': True}
+    if isinstance(exc, NativeFailure):
+        if type(exc.started) is bool:
+            diagnostic['started'] = exc.started
+        if type(exc.returncode) is int and -255 <= exc.returncode <= 255:
+            diagnostic['returncode'] = exc.returncode
+        if type(exc.timeout) in (int, float) and 0 < exc.timeout <= 180 and math.isfinite(exc.timeout):
+            diagnostic['timeout'] = exc.timeout
+        if exc.code in NATIVE_CODES:
+            diagnostic['code'] = exc.code
+    return diagnostic
 
 
 class NativeFailure(ValueError):
     """Raw subprocess evidence stays in memory, never in str(), output or state."""
-    def __init__(self, kind, *, started=True, returncode=None, stderr=None, timeout=None, code=None, receipt=None):
+    def __init__(self, kind, *, started=True, returncode=None, stderr=None, timeout=None, code=None, receipt=None,
+                 launch=None):
         super().__init__('Native Orca operation failed')
         self.kind = kind
         self.started = started
         self.returncode = returncode
         self.stderr = stderr
         self.timeout = timeout
-        self.code = code if code in TRANSIENT_READ_CODES else None
+        self.code = code if isinstance(code, str) and code in NATIVE_CODES else None
         self.receipt = _receipt(receipt)
+        self.launch = _unknown_launch(self.code, launch)
+
+
+def _launch_record(row):
+    """Validate the new private ledger without giving legacy rows replay authority."""
+    launch = row.get('creation_launch')
+    if launch is None:
+        return
+    required = {'protocol', 'context', 'replay_attempts'}
+    allowed = required | {'operationId', 'retrySafe', 'outcome', 'diagnostic'}
+    context = launch.get('context') if isinstance(launch, dict) else None
+    valid = (isinstance(launch, dict) and required <= set(launch) <= allowed
+        and launch['protocol'] == 'agent.launch.v2'
+        and type(launch['replay_attempts']) is int and launch['replay_attempts'] in (0, 1)
+        and isinstance(context, dict) and set(context) == {'executable', 'cwd'}
+        and context.get('cwd') == row.get('project')
+        and all(isinstance(context.get(k), str) and context[k].startswith('/')
+                and '\0' not in context[k] and '..' not in Path(context[k]).parts for k in context))
+    try:
+        valid = valid and str(uuid.UUID(row['creation_id'])) == row['creation_id']
+    except (ValueError, KeyError, TypeError, AttributeError):
+        valid = False
+    if not valid or row.get('state') not in ('creating', 'bound'):
+        raise Blocked('integrity_failure', 'Invalid saved launch context; preserve registry')
+    outcome = launch.get('outcome')
+    if 'operationId' in launch and not _operation_id(launch['operationId']):
+        raise Blocked('integrity_failure', 'Invalid saved native launch identity; preserve registry')
+    if 'retrySafe' in launch and (launch['retrySafe'] is not True or 'operationId' not in launch or outcome is not None):
+        raise Blocked('integrity_failure', 'Invalid saved replay evidence; preserve registry')
+    if 'outcome' in launch and (not isinstance(outcome, dict) or set(outcome) != {'kind', 'handle'}
+            or outcome.get('kind') not in ('terminal', 'structured') or not _safe_identity(outcome.get('handle'))
+            or 'operationId' not in launch):
+        raise Blocked('integrity_failure', 'Invalid saved launch outcome; preserve registry')
+    diagnostic = launch.get('diagnostic')
+    if 'diagnostic' in launch:
+        if (not isinstance(diagnostic, dict) or not {'kind', 'started'} <= set(diagnostic)
+                or set(diagnostic) - {'kind', 'started', 'returncode', 'timeout', 'code'}
+                or not isinstance(diagnostic.get('kind'), str) or diagnostic['kind'] not in NATIVE_KINDS
+                or type(diagnostic.get('started')) is not bool
+                or ('code' in diagnostic and (not isinstance(diagnostic['code'], str) or diagnostic['code'] not in NATIVE_CODES))
+                or ('returncode' in diagnostic and (type(diagnostic['returncode']) is not int
+                                                    or not -255 <= diagnostic['returncode'] <= 255))
+                or ('timeout' in diagnostic and (type(diagnostic['timeout']) not in (int, float)
+                    or not 0 < diagnostic['timeout'] <= 180 or not math.isfinite(diagnostic['timeout'])))):
+            raise Blocked('integrity_failure', 'Invalid saved launch diagnostic; preserve registry')
 
 
 def _receipt(value):
@@ -78,6 +163,7 @@ def _receipt(value):
 def _project_row(row, depth=0):
     if not isinstance(row, dict) or depth > 32:
         raise Blocked('integrity_failure', 'Invalid binding history; preserve registry')
+    _launch_record(row)
     tasks, history = row.get('tasks', {}), row.get('history', [])
     if not isinstance(tasks, dict) or not isinstance(history, list):
         raise Blocked('integrity_failure', 'Invalid task/history structure; preserve registry')
@@ -104,6 +190,9 @@ def _project_row(row, depth=0):
                 or candidate.get('runtime') != row.get('runtime')
                 or candidate.get('worktree') != row.get('worktree')):
             raise Blocked('integrity_failure', 'Invalid creation candidate; preserve registry')
+        launch = row.get('creation_launch')
+        if launch is not None and launch.get('outcome') != {'kind': 'terminal', 'handle': candidate['handle']}:
+            raise Blocked('integrity_failure', 'Candidate differs from native launch receipt; preserve registry')
     if row.get('state') == 'creating' and tasks and 'creation_previous' not in row:
         raise Blocked('integrity_failure', 'Missing prior creation tasks; preserve registry')
     if 'creation_previous' in row:
@@ -267,14 +356,32 @@ class Registry:
 
 
 class NativeOrca:
-    def __init__(self, executable):
+    def __init__(self, executable, cwd=None):
         self.executable = executable
+        self.cwd = cwd
+
+    def execution_context(self, cwd):
+        directory = Path(cwd).resolve(strict=True)
+        def from_child(path):
+            candidate = Path(path)
+            return str(candidate if candidate.is_absolute() else directory / candidate)
+        if os.path.dirname(self.executable):
+            executable = shutil.which(from_child(self.executable))
+        else:
+            # exec resolves relative PATH entries after chdir too; do not consult the parent's cwd.
+            executable = shutil.which(self.executable, path=os.pathsep.join(map(from_child, os.get_exec_path())))
+        if executable is None:
+            raise Blocked('unsupported_contract', 'Cannot pin the native executable; do not launch')
+        self.executable = str(Path(executable).resolve(strict=True))
+        self.cwd = str(directory)
+        return {'executable': self.executable, 'cwd': self.cwd}
 
     def __call__(self, args, timeout=None):
-        timeout = timeout if timeout is not None else (60 if args[:2] == ['terminal', 'send'] else 30)
+        timeout = timeout if timeout is not None else (180 if args[:2] == ['agent', 'launch'] else
+                                                      60 if args[:2] == ['terminal', 'send'] else 30)
         try:
             process = subprocess.Popen([self.executable, *args], stdout=subprocess.PIPE,
-                                       stderr=subprocess.PIPE, text=True, encoding='utf-8')
+                                       stderr=subprocess.PIPE, text=True, encoding='utf-8', cwd=self.cwd)
         except OSError as exc:
             # Popen did not return a child: positive local no-acceptance evidence.
             raise NativeFailure('launch', started=False, stderr=str(exc)) from None
@@ -292,18 +399,22 @@ class NativeOrca:
             result = json.loads(stdout)
         except (ValueError, TypeError):
             result = None
-        if process.returncode:
-            code = None
+        error = result.get('error') if isinstance(result, dict) and result.get('ok') is False else None
+        if process.returncode or isinstance(error, dict):
+            # The public CLI prints JSON errors on stdout. Never mine prose for an ID.
+            code = error.get('code') if isinstance(error, dict) else None
+            launch = error.get('data') if isinstance(error, dict) else None
             try:
-                error = json.loads(stderr)
-                if isinstance(error, dict):
-                    code = error.get('code')
-                    if isinstance(error.get('error'), dict):
-                        code = error['error'].get('code', code)
+                compatibility = json.loads(stderr)
+                if error is None and isinstance(compatibility, dict):
+                    code = compatibility.get('code')
+                    if isinstance(compatibility.get('error'), dict):
+                        code = compatibility['error'].get('code', code)
             except (ValueError, TypeError):
-                if stderr.strip() in TRANSIENT_READ_CODES:
+                if error is None and stderr.strip() in TRANSIENT_READ_CODES:
                     code = stderr.strip()
-            raise NativeFailure('nonzero', returncode=process.returncode, stderr=stderr, code=code, receipt=result)
+            raise NativeFailure('nonzero' if process.returncode else 'invalid_envelope',
+                                returncode=process.returncode, stderr=stderr, code=code, receipt=result, launch=launch)
         if result is None:
             raise NativeFailure('invalid_json', stderr=stderr) from None
         if (not isinstance(result, dict) or result.get('ok') is not True
@@ -334,9 +445,10 @@ class BindingManager:
         self.read_attempts = self.attempts = 0
 
     def _call(self, command):
-        read = command[:2] in (['terminal', 'list'], ['terminal', 'read'], ['terminal', 'wait'])
+        read = command == ['status'] or command[:2] in (['terminal', 'list'], ['terminal', 'read'], ['terminal', 'wait'])
         while True:
-            timeout = 60 if command[:2] == ['terminal', 'send'] else 30
+            timeout = (180 if command[:2] == ['agent', 'launch'] else
+                       60 if command[:2] == ['terminal', 'send'] else 30)
             if read:
                 if self._deadline is not None:
                     remaining = self._deadline - time.monotonic()
@@ -394,7 +506,9 @@ class BindingManager:
             if key == self.key or other.get('runtime') != runtime:
                 continue
             candidate = other.get('creation_candidate') or {}
-            if (other.get('handle') == handle or candidate.get('handle') == handle
+            launch = (((other.get('creation_launch') or {}).get('outcome') or {})
+                      if other.get('state') == 'creating' else {})
+            if (other.get('handle') == handle or candidate.get('handle') == handle or launch.get('handle') == handle
                     or (reservation and other.get('state') == 'creating'
                     and not other.get('handle') and other.get('worktree') == self.worktree)):
                 raise Blocked('busy', 'Terminal is owned or reserved by another conversation')
@@ -460,10 +574,123 @@ class BindingManager:
             self._destination(current)
         return current
 
+    def _creation_inventory(self):
+        runtime, terminals = self._list()
+        handles = [terminal.get('handle') for terminal in terminals]
+        if (not _safe_identity(runtime) or any(not _safe_identity(h) for h in handles)
+                or len(set(handles)) != len(handles)):
+            raise Blocked('integrity_failure', 'Invalid inventory identity; absence is not proven')
+        return runtime, terminals
+
+    def _launch_preflight(self, runtime):
+        status = self._call(['status'])
+        host = status['result'].get('runtime')
+        if (not isinstance(host, dict) or status['_meta']['runtimeId'] != runtime
+                or host.get('runtimeId') != runtime):
+            raise Blocked('identity_changed', 'Launch runtime changed; preserve the original intent')
+        if host.get('state') != 'ready' or host.get('reachable') is not True:
+            raise Blocked('unreachable', 'Launch runtime not ready; retain intent', True)
+        version = host.get('appVersion')
+        capabilities = host.get('capabilities')
+        if (not isinstance(version, str) or re.fullmatch(r'[0-9]+\.[0-9]+\.[0-9]+', version) is None
+                or tuple(map(int, version.split('.'))) < (1, 4, 229)
+                or not isinstance(capabilities, list) or not all(isinstance(c, str) for c in capabilities)
+                or not LAUNCH_CAPABILITIES <= set(capabilities)):
+            raise Blocked('unsupported_contract', 'Need Orca 1.4.229 launch and replay capabilities on the execution host')
+
+    @staticmethod
+    def _creation_blocked(intent, detail, category='create_unverified'):
+        launch = intent.get('creation_launch') or {}
+        view = {k: copy.deepcopy(launch[k]) for k in ('operationId', 'outcome') if k in launch}
+        if view:
+            view['replay_available'] = (launch.get('retrySafe') is True and not launch.get('outcome')
+                                        and launch['replay_attempts'] == 0)
+        return Blocked(category, detail, diagnostic=copy.deepcopy(launch.get('diagnostic')), launch=view)
+
+    def _launch_call(self, intent, retry_launch=None):
+        command = ['agent', 'launch', '--agent', 'claude', '--worktree', 'id:' + self.worktree]
+        if retry_launch is not None:
+            command.extend(['--retry-launch', retry_launch])
+        try:
+            result = self._call(command)
+        except (ValueError, OSError, subprocess.TimeoutExpired) as exc:
+            with Registry(self.state) as db:
+                row = self._creation_unchanged(db, intent)
+                launch = row['creation_launch']
+                launch['diagnostic'] = _diagnostic(exc)
+                proof = exc.launch if isinstance(exc, NativeFailure) else {}
+                if proof and (retry_launch is None or proof['operationId'] == retry_launch):
+                    launch.update(operationId=proof['operationId'], retrySafe=True)
+                db.save()
+                pending = copy.deepcopy(row)
+            raise self._creation_blocked(pending, 'Launch outcome unavailable; retain intent, never start a fresh launch') from None
+        result_data = result['result']
+        outcome, receipt = result_data.get('outcome'), result_data.get('receipt')
+        operation = result_data.get('operationId')
+        if (result['_meta']['runtimeId'] != intent['runtime'] or result_data.get('worktreeId') != self.worktree
+                or not _operation_id(operation) or (retry_launch is not None and operation != retry_launch)
+                or not isinstance(outcome, dict) or outcome.get('kind') not in ('terminal', 'structured')
+                or not _safe_identity(outcome.get('handle')) or not isinstance(receipt, dict)
+                or receipt.get('mode') != outcome['kind']):
+            raise self._creation_blocked(intent, 'Launch identity unverifiable; retain intent and do not recreate')
+        with Registry(self.state) as db:
+            row = self._creation_unchanged(db, intent)
+            launch = row['creation_launch']
+            launch.update(operationId=operation, outcome={k: outcome[k] for k in ('kind', 'handle')})
+            launch.pop('retrySafe', None)
+            # The known handle survives any subsequent inventory/read failure, even before incarnation is known.
+            db.save()
+            return copy.deepcopy(row)
+
+    def _replay_launch(self, intent, operation):
+        launch = intent.get('creation_launch') or {}
+        if (not _operation_id(operation) or launch.get('operationId') != operation
+                or launch.get('retrySafe') is not True or launch.get('outcome')
+                or intent.get('creation_candidate') or launch.get('replay_attempts') != 0):
+            raise self._creation_blocked(intent, 'No matching unused native replay proof; preserve intent')
+        if self.orca.execution_context(self.project) != launch.get('context'):
+            raise Blocked('identity_changed', 'Native launch executable or cwd changed; do not replay')
+        runtime, _ = self._creation_inventory()
+        if runtime != intent['runtime']:
+            raise Blocked('identity_changed', 'Original launch host changed; do not replay')
+        self._launch_preflight(runtime)
+        with Registry(self.state) as db:
+            row = self._creation_unchanged(db, intent)
+            row['creation_launch']['replay_attempts'] = 1
+            db.save()  # Consume the one explicit replay before calling the native ledger.
+            replay = copy.deepcopy(row)
+        return self._complete_creation(self._launch_call(replay, operation))
+
     def _complete_creation(self, intent):
         candidate = intent.get('creation_candidate')
         if not candidate:
-            raise Blocked('create_unverified', 'Creation outcome unknown; retain intent and never submit again')
+            launch = intent.get('creation_launch') or {}
+            outcome = launch.get('outcome')
+            if not outcome:
+                raise self._creation_blocked(intent, 'Creation outcome unknown; retain intent and never submit again')
+            if outcome['kind'] == 'structured':
+                raise self._creation_blocked(intent, 'Native launch opened a chat; terminal binding is unsupported',
+                                             'unsupported_contract')
+            with Registry(self.state) as db:
+                self._creation_unchanged(db, intent)
+                self._unoccupied(db, intent['runtime'], outcome['handle'])
+            try:
+                runtime, terminals = self._creation_inventory()
+            except (ValueError, OSError, subprocess.TimeoutExpired):
+                raise self._creation_blocked(intent, 'Launch receipt saved; exact terminal inventory unavailable') from None
+            matches = [t for t in terminals if t.get('handle') == outcome['handle']]
+            if (runtime != intent['runtime'] or len(matches) != 1
+                    or not _safe_identity(matches[0].get('incarnationId'))
+                    or matches[0].get('worktreeId') != self.worktree or matches[0].get('agentIdentity') != 'claude'):
+                raise self._creation_blocked(intent, 'Launch receipt saved; exact CC identity not verified')
+            candidate = {'runtime': runtime, 'handle': outcome['handle'],
+                         'incarnation': matches[0]['incarnationId'], 'worktree': self.worktree}
+            with Registry(self.state) as db:
+                row = self._creation_unchanged(db, intent)
+                self._unoccupied(db, runtime, candidate['handle'])
+                row['creation_candidate'] = candidate
+                db.save()
+                intent = copy.deepcopy(row)
         with Registry(self.state) as db:
             self._creation_unchanged(db, intent)
             self._unoccupied(db, candidate['runtime'], candidate['handle'])
@@ -472,7 +699,7 @@ class BindingManager:
             self._verify(target)
             self._idle(target)
         except (ValueError, OSError, subprocess.TimeoutExpired):
-            raise Blocked('create_unverified', 'Created target not verified; retain candidate and do not recreate') from None
+            raise self._creation_blocked(intent, 'Created target not verified; retain candidate and do not recreate') from None
         with Registry(self.state) as db:
             row = self._creation_unchanged(db, intent)
             self._unoccupied(db, candidate['runtime'], candidate['handle'])
@@ -482,32 +709,35 @@ class BindingManager:
             row.pop('creation_candidate', None)
             row.update(**candidate, state='bound', tasks={}, active_task=None)
             db.save()
-            return {**self._view(row), 'action': 'bound', 'creation_id': row['creation_id']}
+            result = {**self._view(row), 'action': 'bound', 'creation_id': row['creation_id']}
+            if 'creation_launch' in row:
+                result['operationId'] = row['creation_launch']['operationId']
+            return result
 
     @_command
-    def create(self, confirm=False):
+    def create(self, confirm=False, retry_launch=None):
         snapshot = copy.deepcopy(Registry.inspect(self.state)['bindings'].get(self.key))
+        if retry_launch is not None and (not confirm or snapshot is None or snapshot.get('state') != 'creating'):
+            raise Blocked('invalid_input', 'Replay requires explicit create confirm and the original pending launch')
         if snapshot is not None:
             self._destination(snapshot)
             self._creation_ready(snapshot)
             if snapshot.get('state') == 'creating':
                 if not confirm:
-                    raise Blocked('create_unverified', 'Pending creation; only verify its saved exact candidate')
+                    raise self._creation_blocked(snapshot, 'Pending creation; only verify its saved exact candidate')
+                if retry_launch is not None:
+                    return self._replay_launch(snapshot, retry_launch)
                 return self._complete_creation(snapshot)
             if snapshot.get('state') != 'bound':
                 raise Blocked('integrity_failure', 'Invalid binding state; preserve registry')
+        context = self.orca.execution_context(self.project)
         try:
-            runtime, terminals = self._list()
+            runtime, terminals = self._creation_inventory()
         except Blocked as exc:
             if exc.category == 'unreachable':
                 raise Blocked('unreachable', 'Runtime unavailable; wait one to two minutes and inspect the same operation',
                               exc.retryable) from None
             raise
-        if not _safe_identity(runtime):
-            raise Blocked('integrity_failure', 'Invalid runtime identity; do not reserve creation')
-        handles = [terminal.get('handle') for terminal in terminals]
-        if any(not _safe_identity(handle) for handle in handles) or len(set(handles)) != len(handles):
-            raise Blocked('integrity_failure', 'Invalid or duplicate terminal identity; absence is not proven')
         if snapshot is not None:
             if runtime != snapshot['runtime']:
                 raise Blocked('identity_changed', 'Runtime changed; original absence is not proven')
@@ -519,6 +749,7 @@ class BindingManager:
                 if matches[0].get('connected') is not True:
                     raise Blocked('unreachable', 'Original target disconnected; wait one to two minutes and inspect', True)
                 raise Blocked('has_live_binding', 'A live binding exists; retain it instead of creating')
+        self._launch_preflight(runtime)
         if not confirm:
             matching = [t for t in terminals if t.get('worktreeId') == self.worktree]
             inventory = []
@@ -532,12 +763,15 @@ class BindingManager:
                         item[key] = terminal[key]
                 inventory.append(item)
             return {'action': 'dry_run', 'plan': {'project': self.worktree, 'agent': 'claude',
-                    'mode': 'auto', 'placement': 'new terminal in the explicit worktree'},
+                    'required_mode': 'auto', 'placement': 'native agent surface in the explicit worktree'},
                     'inventory': inventory, 'inventory_count': len(matching),
                     'inventory_limited': len(matching) > 20}
         row = {'owner': self.owner, 'project': self.project, 'environment': self.environment,
                'worktree': self.worktree, 'runtime': runtime, 'state': 'creating',
                'creation_id': str(uuid.uuid4()), 'tasks': {}, 'active_task': None}
+        row['creation_launch'] = {'protocol': 'agent.launch.v2', 'context': context,
+                                  'replay_attempts': 0}
+        _launch_record(row)
         if snapshot is not None:
             previous = copy.deepcopy(snapshot)
             previous.pop('history', None)
@@ -547,26 +781,7 @@ class BindingManager:
             self._creation_unchanged(db, snapshot)
             db.data['bindings'][self.key] = copy.deepcopy(row)
             db.save()  # Reservation is durable before the single, non-retried create.
-        try:
-            result = self._call(['terminal', 'create', '--worktree', 'id:' + self.worktree,
-                                 '--command', 'claude --permission-mode auto',
-                                 '--title', 'grok-cc ' + self.owner['controller'] + ' ' + self.owner['session_id'][:8]])
-        except (ValueError, OSError, subprocess.TimeoutExpired):
-            raise Blocked('create_unverified', 'Create outcome unavailable; preserve reservation and do not retry') from None
-        terminal = result['result'].get('terminal', {})
-        if (not isinstance(terminal, dict) or result['_meta']['runtimeId'] != runtime
-                or terminal.get('worktreeId') != self.worktree
-                or not _safe_identity(runtime) or not _safe_identity(terminal.get('handle'))
-                or not _safe_identity(terminal.get('incarnationId'))):
-            raise Blocked('create_unverified', 'Creation identity unverifiable; never recreate')
-        with Registry(self.state) as db:
-            current = self._creation_unchanged(db, row)
-            self._unoccupied(db, runtime, terminal['handle'])
-            current['creation_candidate'] = {'runtime': runtime, 'handle': terminal['handle'],
-                    'incarnation': terminal['incarnationId'], 'worktree': self.worktree}
-            db.save()
-            pending = copy.deepcopy(current)
-        return self._complete_creation(pending)
+        return self._complete_creation(self._launch_call(row))
 
     def _idle(self, row, allow_hint=True):
         wait = self._call(['terminal', 'wait', '--terminal', row['handle'], '--for', 'tui-idle',
@@ -808,6 +1023,7 @@ class BindingManager:
             old = copy.deepcopy(row)
             old.pop('history', None)  # Prior snapshots remain in the flat history, never duplicated recursively.
             row.setdefault('history', []).append(old)
+            row.pop('creation_launch', None)
             row.update(runtime=runtime, handle=confirm_handle, incarnation=confirm_incarnation,
                        tasks={}, active_task=None)
             db.save()
@@ -839,13 +1055,16 @@ def main():
         parser.add_argument('--text-file')
         parser.add_argument('--retry-budget-s', type=float, default=300)
         parser.add_argument('--retry-request', nargs='?', const='')
+        parser.add_argument('--retry-launch')
         parser.add_argument('--confirm-handle')
         parser.add_argument('--confirm-incarnation')
         args = parser.parse_args()
         if args.retry_request is not None:
             raise Blocked('unsupported_contract', 'Native request retry contract is unavailable')
-        if args.command != 'create' and (args.create_project is not None or args.confirm):
+        if args.command != 'create' and (args.create_project is not None or args.confirm or args.retry_launch is not None):
             raise Blocked('invalid_input', 'Project/confirm parameters require explicit create')
+        if args.retry_launch is not None and not args.confirm:
+            raise Blocked('invalid_input', 'Native launch replay requires explicit confirm')
         if args.command == 'create':
             if not args.create_project or (args.worktree and
                     args.worktree.removeprefix('id:') != args.create_project.removeprefix('id:')):
@@ -858,11 +1077,11 @@ def main():
             if not args.project_root or not args.worktree:
                 raise Blocked('invalid_input', 'Need project-root and explicit cloud worktree')
             manager = BindingManager(args.state_dir, owner, args.project_root, args.environment,
-                                     args.worktree, NativeOrca(args.orca), args.retry_budget_s)
+                                     args.worktree, NativeOrca(args.orca, cwd=args.project_root), args.retry_budget_s)
             if args.command == 'ensure':
                 result = manager.ensure()
             elif args.command == 'create':
-                result = manager.create(confirm=args.confirm)
+                result = manager.create(confirm=args.confirm, retry_launch=args.retry_launch)
             elif args.command == 'rebind':
                 result = manager.rebind(args.confirm_handle, args.confirm_incarnation)
             else:

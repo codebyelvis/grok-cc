@@ -21,6 +21,14 @@ TARGET = SCRIPTS / 'session_binding.py'
 OWNER_A = {'controller': 'codex', 'session_id': '11111111-1111-4111-8111-111111111111'}
 OWNER_B = {'controller': 'claudex', 'session_id': '22222222-2222-4222-8222-222222222222'}
 WORKTREE = 'repo::/home/box/orca/projects/hello'
+LAUNCH_CAPABILITIES = ['agent.launch.v2', 'agent.launch.replay-required.v1',
+                       'agent.launch.local-presentation.v1']
+OPERATION_ID = '1792370000000-00000000000000000000000000000001'
+
+
+def launch_result(terminal, operation_id=OPERATION_ID, kind='terminal'):
+    return {'operationId': operation_id, 'outcome': {'kind': kind, 'handle': terminal['handle']},
+            'worktreeId': terminal['worktreeId'], 'receipt': {'mode': kind, 'detail': 'PRIVATE-DETAIL'}}
 
 
 class RemoteOrca:
@@ -36,6 +44,15 @@ class RemoteOrca:
         self.prompt_space = ' '
         self.calls = []
         self.hook = None
+        self.executable = '/fixture/orca'
+        self.version = '1.4.229'
+        self.capabilities = list(LAUNCH_CAPABILITIES)
+        self.ready = True
+        self.launches = {}
+        self.replays = 0
+
+    def execution_context(self, cwd):
+        return {'executable': self.executable, 'cwd': cwd}
 
     def __call__(self, args, timeout=None):
         self.calls.append((list(args), timeout))
@@ -46,18 +63,29 @@ class RemoteOrca:
         if self.offline:
             raise OSError('remote_runtime_unavailable')
         envelope = {'ok': True, '_meta': {'runtimeId': self.runtime}}
-        action = args[1]
-        if action == 'list':
+        action = args[1] if args[0] != 'status' else 'status'
+        if action == 'status':
+            envelope['result'] = {'runtime': {'state': 'ready' if self.ready else 'starting',
+                'reachable': self.ready, 'runtimeId': self.runtime, 'appVersion': self.version,
+                'capabilities': list(self.capabilities)}}
+        elif action == 'list':
             envelope['result'] = {'terminals': copy.deepcopy(self.terminals), 'truncated': False}
-        elif action == 'create':
-            self.creates += 1
-            terminal = {'handle': 'term_' + str(self.creates), 'incarnationId': 'inc_' + str(self.creates),
+        elif action == 'launch':
+            if '--retry-launch' in args:
+                self.replays += 1
+                operation_id = args[args.index('--retry-launch') + 1]
+                terminal = self.launches[operation_id]
+            else:
+                self.creates += 1
+                operation_id = '1792370000000-' + format(self.creates, '032x')
+                terminal = {'handle': 'term_' + str(self.creates), 'incarnationId': 'inc_' + str(self.creates),
                         'worktreeId': WORKTREE, 'agentIdentity': 'claude', 'connected': True,
                         'writable': True, 'orphaned': False}
-            self.terminals.append(terminal)
+                self.terminals.append(terminal)
+                self.launches[operation_id] = copy.deepcopy(terminal)
             if self.lose_create:
                 raise TimeoutError('response lost after create')
-            envelope['result'] = {'terminal': copy.deepcopy(terminal)}
+            envelope['result'] = launch_result(terminal, operation_id)
         elif action == 'wait':
             envelope['result'] = {'wait': {'satisfied': not self.busy}}
         elif action == 'read':
@@ -102,18 +130,50 @@ class BindingTests(unittest.TestCase):
         self.assertTrue(callable(getattr(manager, 'create', None)), 'Missing explicit create entry point')
         return manager.create(confirm=confirm)
 
+    def fixture_env(self):
+        # A forgotten --orca must fail locally, never find an installed CLI.
+        return {**os.environ, 'CODEX_THREAD_ID': OWNER_A['session_id'],
+                'PATH': str(self.root / 'fixture-only-path'),
+                'ORCA_CLI_COMMAND': str(self.root / 'disabled-default-orca')}
+
+    def unknown_launch(self):
+        """The external host admitted a launch; only its replay envelope was returned."""
+        def lose(args):
+            if args[:2] == ['agent', 'launch']:
+                self.remote.hook = None
+                result = self.remote(args)
+                self.remote.hook = lose
+                raise self.failure('nonzero', returncode=1, code='agent_session_operation_unknown',
+                    stderr='PRIVATE-STDERR', launch={'launchOutcome': 'unknown', 'retrySafe': True,
+                        'operationId': result['result']['operationId'], 'launchRequest': 'PRIVATE-PROMPT'})
+        self.remote.hook = lose
+        with self.assertRaises(self.mod.Blocked) as caught:
+            self.explicit_create()
+        self.remote.hook = None
+        return caught.exception
+
     def cli_fixture(self):
         path = self.root / 'orca-create-fixture'
-        path.write_text('''#!/usr/bin/env python3
-import json,pathlib,sys
+        path.write_text('#!' + sys.executable + '\n' + '''
+import json,pathlib,sys,os,time
 p=pathlib.Path(__file__).parent
-args=sys.argv[1:]; action=args[1]
+args=sys.argv[1:]; action=args[1] if args[0]!='status' else 'status'
 with (p/'native-calls.jsonl').open('a') as f: f.write(json.dumps(args)+'\\n')
+with (p/'native-cwds.jsonl').open('a') as f: f.write(json.dumps(os.getcwd())+'\\n')
 t={'handle':'term-cli','incarnationId':'inc-cli','worktreeId':'repo::/home/box/orca/projects/hello','agentIdentity':'claude','connected':True,'writable':True,'orphaned':False}
-if action=='list': r={'terminals':[t] if (p/'created-cli').exists() else [],'truncated':False}
-elif action=='create':
- with (p/'created-cli').open('a') as f: f.write('create\\n')
- r={'terminal':t}
+if action=='status': r={'runtime':{'state':'ready','reachable':True,'runtimeId':'runtime-cli','appVersion':'1.4.229','capabilities':['agent.launch.v2','agent.launch.replay-required.v1','agent.launch.local-presentation.v1']}}
+elif action=='list': r={'terminals':[t] if (p/'created-cli').exists() else [],'truncated':False}
+elif action=='launch':
+ if '--retry-launch' not in args:
+  with (p/'created-cli').open('a') as f: f.write('create\\n')
+ r={'operationId':'1792370000000-00000000000000000000000000000001','outcome':{'kind':'terminal','handle':t['handle']},'worktreeId':t['worktreeId'],'receipt':{'mode':'terminal'}}
+ if (p/'unknown-reply').exists() and '--retry-launch' not in args:
+  print(json.dumps({'ok':False,'error':{'code':'agent_session_operation_unknown','message':'PRIVATE-MESSAGE','data':{'launchOutcome':'unknown','retrySafe':True,'operationId':r['operationId'],'launchRequest':'PRIVATE-SOURCE','cause':'PRIVATE-CAUSE','recoveryCommand':['PRIVATE-AUTH']}},'_meta':{'runtimeId':None}})); sys.exit(1)
+ if '--retry-launch' in args:
+  assert args[args.index('--retry-launch')+1]==r['operationId']
+  assert (p/'created-cli').read_text()=='create\\n'
+  with (p/'replayed-cli').open('a') as f: f.write('replay\\n')
+  time.sleep(.1)
 elif action=='wait': r={'wait':{'satisfied':True}}
 elif action=='read': r={'terminal':{'handle':'term-cli','tail':['────────','❯','────────','auto mode on'],'source':'screen' if '--screen' in args else 'stream','truncated':False,'limited':False,'latestCursor':'1'}}
 else: raise SystemExit('unsupported fixture operation')
@@ -121,6 +181,328 @@ print(json.dumps({'ok':True,'result':r,'_meta':{'runtimeId':'runtime-cli'}}))
 ''')
         path.chmod(0o700)
         return path
+
+    def test_relative_executable_is_pinned_from_child_cwd_before_every_native_call(self):
+        source = self.cli_fixture()
+        caller = self.root / 'caller'; caller.mkdir()
+        for directory in (caller, self.project):
+            target = directory / 'orca'
+            target.write_bytes(source.read_bytes()); target.chmod(0o700)
+        for case, executable in enumerate(('./orca', 'orca')):
+            with self.subTest(executable=executable):
+                self.state = self.root / ('path-state-' + str(case))
+                command = [sys.executable, '-B', str(TARGET), 'create', '--controller', 'codex',
+                           '--project-root', str(self.project), '--project', WORKTREE, '--confirm',
+                           '--state-dir', str(self.state), '--orca', executable]
+                result = subprocess.run(command, cwd=caller, env={**self.fixture_env(), 'PATH': '.'},
+                                        capture_output=True, text=True, timeout=15)
+                self.assertEqual(result.returncode, 0, result.stderr)
+                self.assertFalse((caller / 'native-calls.jsonl').exists(), 'Must not change executable after preflight')
+                calls = [json.loads(line) for line in (self.project / 'native-calls.jsonl').read_text().splitlines()]
+                self.assertEqual(sum(a[:2] == ['agent', 'launch'] for a in calls), 1)
+                self.assertEqual(self.saved()['creation_launch']['context'], {
+                    'cwd': str(self.project), 'executable': str(self.project / 'orca')})
+                self.assertTrue(all(json.loads(cwd) == str(self.project)
+                                for cwd in (self.project / 'native-cwds.jsonl').read_text().splitlines()))
+                for name in ('native-calls.jsonl', 'native-cwds.jsonl', 'created-cli'):
+                    (self.project / name).unlink()
+
+    def test_null_saved_outcome_is_blocked_as_json_before_other_owner_queries(self):
+        self.explicit_create()
+        self.unknown_launch_for_other_owner()
+        original = json.loads((self.state / 'bindings.json').read_text())
+        executable = self.cli_fixture()
+        command = [sys.executable, '-B', str(TARGET), 'ensure', '--controller', 'codex',
+                   '--project-root', str(self.project), '--worktree', WORKTREE,
+                   '--state-dir', str(self.state), '--orca', str(executable)]
+        for field, value in (('outcome', None), ('outcome', []), ('outcome', {'kind': 'terminal'}),
+                             ('diagnostic', None), ('diagnostic', {'kind': [], 'started': True}),
+                             ('diagnostic', {'kind': 'nonzero', 'started': True, 'code': []}),
+                             ('diagnostic', {'kind': 'timeout', 'started': True, 'timeout': 10 ** 400})):
+            with self.subTest(field=field, value=value):
+                data = copy.deepcopy(original)
+                data['bindings'][self.mod.owner_key(OWNER_B)]['creation_launch'][field] = value
+                (self.state / 'bindings.json').write_text(json.dumps(data))
+                before = (self.state / 'bindings.json').read_bytes()
+                result = subprocess.run(command, env=self.fixture_env(), capture_output=True, text=True, timeout=15)
+                self.assertEqual(result.returncode, 1)
+                self.assertEqual(json.loads(result.stderr)['category'], 'integrity_failure')
+                self.assertEqual((self.state / 'bindings.json').read_bytes(), before)
+                self.assertFalse((self.root / 'native-calls.jsonl').exists())
+
+    def unknown_launch_for_other_owner(self):
+        self.remote.lose_create = True
+        with self.assertRaises(self.mod.Blocked): self.explicit_create(self.manager(OWNER_B))
+        self.remote.lose_create = False
+
+    def test_fixture_environment_disables_unselected_native_cli(self):
+        result = subprocess.run([sys.executable, '-B', str(TARGET), 'create', '--controller', 'codex',
+            '--project-root', str(self.project), '--project', WORKTREE, '--confirm',
+            '--state-dir', str(self.state), '--retry-budget-s', '0'], env=self.fixture_env(),
+            capture_output=True, text=True, timeout=15)
+        self.assertEqual(result.returncode, 1)
+        self.assertEqual(json.loads(result.stderr)['category'], 'unsupported_contract')
+        self.assertFalse(self.state.exists())
+
+    def test_launch_receipt_is_durable_before_inventory_and_incarnation_lookup(self):
+        observed = []
+        def observe(args):
+            if args[:2] == ['terminal', 'list'] and self.remote.creates:
+                row = self.saved()
+                observed.append(copy.deepcopy(row.get('creation_launch')))
+        self.remote.hook = observe
+        result = self.explicit_create()
+        self.assertTrue(observed)
+        self.assertEqual(observed[0]['operationId'], OPERATION_ID)
+        self.assertEqual(observed[0]['outcome'], {'kind': 'terminal', 'handle': 'term_1'})
+        self.assertEqual(result['incarnation'], 'inc_1')
+        self.assertNotIn('PRIVATE', (self.state / 'bindings.json').read_text())
+        args, timeout = next((a, t) for a, t in self.remote.calls if a[:2] == ['agent', 'launch'])
+        self.assertEqual(timeout, 180)
+        self.assertEqual(args[:2], ['agent', 'launch'])
+
+    def test_launch_preflight_rejects_old_missing_capability_and_unready_before_reservation(self):
+        for version, caps, ready in (('1.4.228', LAUNCH_CAPABILITIES, True),
+                ('unknown', LAUNCH_CAPABILITIES, True), ('1.4.229-beta', LAUNCH_CAPABILITIES, True),
+                ('1.4.229', LAUNCH_CAPABILITIES[:-1], True), ('1.4.229', LAUNCH_CAPABILITIES, False)):
+            with self.subTest(version=version, caps=caps, ready=ready):
+                self.remote.version, self.remote.capabilities, self.remote.ready = version, caps, ready
+                with self.assertRaises(self.mod.Blocked): self.explicit_create()
+                self.assertFalse(self.state.exists())
+                self.assertEqual(self.remote.creates, 0)
+
+    def test_structured_outcome_stays_pending_without_terminal_verification_or_replay(self):
+        def structured(args):
+            if args[:2] == ['agent', 'launch']:
+                return {'ok': True, '_meta': {'runtimeId': self.remote.runtime}, 'result':
+                        launch_result({'handle': 'agent_1', 'worktreeId': WORKTREE}, kind='structured')}
+        self.remote.hook = structured
+        with self.assertRaises(self.mod.Blocked) as caught: self.explicit_create()
+        self.assertEqual(caught.exception.category, 'unsupported_contract')
+        self.assertEqual(self.saved()['creation_launch']['outcome']['kind'], 'structured')
+        self.assertNotIn('creation_candidate', self.saved())
+        before = (self.state / 'bindings.json').read_bytes(); calls = len(self.remote.calls)
+        for action in (lambda: self.explicit_create(),
+                       lambda: self.manager().create(confirm=True, retry_launch=OPERATION_ID),
+                       lambda: self.manager().send('one', 'main', 'text')):
+            with self.assertRaises(self.mod.Blocked): action()
+        self.assertEqual((self.state / 'bindings.json').read_bytes(), before)
+        self.assertEqual(len(self.remote.calls), calls)
+        self.assertEqual(self.remote.sends, 0)
+
+    def test_unknown_launch_reports_only_safe_fields_and_replays_same_id_once(self):
+        failure = self.unknown_launch()
+        row = self.saved(); creation_id = row['creation_id']
+        self.assertEqual(row['creation_launch']['operationId'], OPERATION_ID)
+        self.assertEqual(row['creation_launch']['replay_attempts'], 0)
+        self.assertEqual(failure.result()['diagnostic']['code'], 'agent_session_operation_unknown')
+        self.assertNotIn('PRIVATE', json.dumps(failure.result()) + (self.state / 'bindings.json').read_text())
+        before = (self.state / 'bindings.json').read_bytes(); calls = len(self.remote.calls)
+        with self.assertRaises(self.mod.Blocked): self.explicit_create()
+        self.assertEqual(len(self.remote.calls), calls)
+        self.assertEqual((self.state / 'bindings.json').read_bytes(), before)
+        bound = self.manager().create(confirm=True, retry_launch=OPERATION_ID)
+        self.assertEqual(bound['handle'], 'term_1')
+        self.assertEqual(self.saved()['creation_id'], creation_id)
+        self.assertEqual(self.saved()['creation_launch']['replay_attempts'], 1)
+        self.assertEqual((self.remote.creates, self.remote.replays, self.remote.sends), (1, 1, 0))
+        command = next(a for a, _ in self.remote.calls if '--retry-launch' in a)
+        self.assertEqual(command[command.index('--retry-launch') + 1], OPERATION_ID)
+        with self.assertRaises(self.mod.Blocked): self.manager().create(confirm=True, retry_launch=OPERATION_ID)
+        self.assertEqual(self.remote.replays, 1)
+
+    def test_replay_requires_saved_id_confirm_original_context_and_budget(self):
+        self.unknown_launch()
+        original = (self.state / 'bindings.json').read_bytes()
+        calls = len(self.remote.calls)
+        for confirm, identity in ((False, OPERATION_ID), (True, '1792370000000-' + 'a' * 32),
+                                  (True, 'PRIVATE-ID')):
+            with self.subTest(confirm=confirm, identity=identity):
+                with self.assertRaises(self.mod.Blocked): self.manager().create(confirm=confirm, retry_launch=identity)
+                self.assertEqual(len(self.remote.calls), calls)
+                self.assertEqual((self.state / 'bindings.json').read_bytes(), original)
+        self.remote.executable = '/fixture/different-orca'
+        with self.assertRaises(self.mod.Blocked): self.manager().create(confirm=True, retry_launch=OPERATION_ID)
+        self.assertEqual(len(self.remote.calls), calls)
+        self.remote.executable = '/fixture/orca'
+        self.remote.runtime = 'upgraded-runtime'
+        with self.assertRaises(self.mod.Blocked): self.manager().create(confirm=True, retry_launch=OPERATION_ID)
+        self.assertEqual(self.remote.replays, 0)
+        self.assertEqual((self.state / 'bindings.json').read_bytes(), original)
+        self.remote.runtime = 'runtime-one'
+        def lose_again(args):
+            if '--retry-launch' in args:
+                self.remote.replays += 1
+                self.assertEqual(self.saved()['creation_launch']['replay_attempts'], 1)
+                raise self.failure('nonzero', code='agent_session_operation_unknown', launch={
+                    'launchOutcome': 'unknown', 'retrySafe': True, 'operationId': OPERATION_ID})
+        self.remote.hook = lose_again
+        with self.assertRaises(self.mod.Blocked): self.manager().create(confirm=True, retry_launch=OPERATION_ID)
+        self.remote.hook = None
+        with self.assertRaises(self.mod.Blocked): self.manager().create(confirm=True, retry_launch=OPERATION_ID)
+        self.assertEqual(self.remote.replays, 1)
+        self.assertEqual(self.remote.creates, 1)
+
+    def test_legacy_no_id_pending_is_unchanged_after_upgrade_even_with_retry_flag(self):
+        self.remote.lose_create = True
+        with self.assertRaises(self.mod.Blocked): self.explicit_create()
+        self.change_row(lambda row: row.pop('creation_launch', None))
+        before = (self.state / 'bindings.json').read_bytes(); calls = len(self.remote.calls)
+        self.remote.lose_create = False; self.remote.runtime = 'upgraded-runtime'; self.remote.terminals.clear()
+        for action in (lambda: self.explicit_create(),
+                       lambda: self.manager().create(confirm=True, retry_launch=OPERATION_ID)):
+            with self.assertRaises(self.mod.Blocked): action()
+        self.assertEqual((self.state / 'bindings.json').read_bytes(), before)
+        self.assertEqual(len(self.remote.calls), calls)
+        self.assertEqual(self.remote.creates, 1)
+
+    def test_known_receipt_survives_failed_inventory_and_can_only_resume_exact_handle(self):
+        def fail_inventory(args):
+            if args[:2] == ['terminal', 'list'] and self.remote.creates:
+                raise self.failure('invalid_json', stderr='PRIVATE-INVENTORY')
+        self.remote.hook = fail_inventory
+        with self.assertRaises(self.mod.Blocked): self.explicit_create()
+        self.assertEqual(self.saved()['creation_launch']['outcome']['handle'], 'term_1')
+        self.assertNotIn('creation_candidate', self.saved())
+        self.remote.hook = None
+        self.remote.terminals[0]['incarnationId'] = 'inc-exact-from-inventory'
+        bound = self.explicit_create()
+        self.assertEqual(bound['incarnation'], 'inc-exact-from-inventory')
+        self.assertEqual((self.remote.creates, self.remote.replays), (1, 0))
+
+    def test_stdout_native_error_contract_is_minimized_not_parsed_from_prose(self):
+        native = self.mod.NativeOrca('/fixture/orca')
+        data = {'launchOutcome': 'unknown', 'retrySafe': True, 'operationId': OPERATION_ID,
+                'launchRequest': 'PRIVATE-PROMPT', 'cause': 'PRIVATE-CAUSE', 'recoveryCommand': 'PRIVATE'}
+        for returncode in (0, 1):
+            process = Mock(returncode=returncode)
+            process.communicate.return_value = (json.dumps({'ok': False, 'error': {
+                'code': 'agent_session_operation_unknown', 'message': 'PRIVATE', 'data': data}}), 'PRIVATE-STDERR')
+            with patch.object(self.mod.subprocess, 'Popen', return_value=process):
+                with self.assertRaises(self.mod.NativeFailure) as caught: native(['agent', 'launch'])
+            self.assertEqual(caught.exception.code, 'agent_session_operation_unknown')
+            self.assertEqual(caught.exception.launch, {k: data[k] for k in ('launchOutcome', 'retrySafe', 'operationId')})
+            self.assertNotIn('PRIVATE', str(caught.exception) + json.dumps(caught.exception.launch))
+        for poison in ({**data, 'operationId': 'PRIVATE'}, {**data, 'retrySafe': 'true'},
+                       {'message': OPERATION_ID, 'launchOutcome': 'unknown', 'retrySafe': True},
+                       {**data, 'launchOutcome': 'success'}):
+            process = Mock(returncode=1)
+            process.communicate.return_value = (json.dumps({'ok': False, 'error': {
+                'code': 'agent_session_operation_unknown', 'data': poison}}), OPERATION_ID)
+            with patch.object(self.mod.subprocess, 'Popen', return_value=process):
+                with self.assertRaises(self.mod.NativeFailure) as caught: native(['agent', 'launch'])
+            self.assertEqual(caught.exception.launch, {})
+
+    def test_real_cli_replays_stdout_unknown_once_under_concurrent_callers(self):
+        executable = self.cli_fixture()
+        (self.root / 'unknown-reply').touch()
+        env = self.fixture_env()
+        command = [sys.executable, '-B', str(TARGET), 'create', '--controller', 'codex',
+                   '--project-root', str(self.project), '--project', WORKTREE, '--confirm',
+                   '--state-dir', str(self.state), '--orca', str(executable)]
+        first = subprocess.run(command, capture_output=True, text=True, env=env, timeout=15)
+        self.assertEqual(first.returncode, 1, first.stdout)
+        blocked = json.loads(first.stderr)
+        self.assertEqual(blocked['launch']['operationId'], OPERATION_ID)
+        self.assertTrue(blocked['launch']['replay_available'])
+        self.assertEqual(blocked['diagnostic']['returncode'], 1)
+        self.assertNotIn('PRIVATE', first.stdout + first.stderr + (self.state / 'bindings.json').read_text())
+        pending_id = self.saved()['creation_id']
+        before = (self.state / 'bindings.json').read_bytes()
+        again = subprocess.run(command, capture_output=True, text=True, env=env, timeout=15)
+        self.assertEqual(again.returncode, 1)
+        self.assertEqual((self.state / 'bindings.json').read_bytes(), before)
+        replay = [*command, '--retry-launch', OPERATION_ID]
+        processes = [subprocess.Popen(replay, stdout=subprocess.PIPE, stderr=subprocess.PIPE, env=env)
+                     for _ in range(4)]
+        outputs = [(p, p.communicate(timeout=15)) for p in processes]
+        self.assertTrue(any(p.returncode == 0 for p, _ in outputs), outputs)
+        self.assertTrue(all(p.returncode in (0, 1) for p, _ in outputs))
+        self.assertEqual((self.root / 'created-cli').read_text(), 'create\n')
+        self.assertEqual((self.root / 'replayed-cli').read_text(), 'replay\n')
+        self.assertEqual(self.saved()['creation_id'], pending_id)
+        self.assertEqual(self.saved()['state'], 'bound')
+        self.assertEqual(self.saved()['creation_launch']['replay_attempts'], 1)
+        calls = [json.loads(line) for line in (self.root / 'native-calls.jsonl').read_text().splitlines()]
+        self.assertEqual(sum(a[:2] == ['agent', 'launch'] for a in calls), 2)
+        self.assertEqual(sum('--retry-launch' in a for a in calls), 1)
+        cwds = [json.loads(line) for line in (self.root / 'native-cwds.jsonl').read_text().splitlines()]
+        self.assertTrue(cwds and all(cwd == str(self.project) for cwd in cwds))
+
+    def test_replay_reservation_fsync_failure_prevents_native_replay(self):
+        self.unknown_launch()
+        original = (self.state / 'bindings.json').read_bytes()
+        fsync = self.mod.os.fsync
+        for directory in (False, True):
+            with self.subTest(directory=directory):
+                (self.state / 'bindings.json').write_bytes(original)
+                def fail(fd):
+                    if stat.S_ISDIR(os.fstat(fd).st_mode) == directory:
+                        raise OSError('PRIVATE-SYNC')
+                    return fsync(fd)
+                with patch.object(self.mod.os, 'fsync', side_effect=fail):
+                    with self.assertRaises(OSError):
+                        self.manager().create(confirm=True, retry_launch=OPERATION_ID)
+                self.assertEqual(self.remote.replays, 0)
+                if directory:
+                    with self.assertRaises(self.mod.Blocked):
+                        self.manager().create(confirm=True, retry_launch=OPERATION_ID)
+                    self.assertEqual(self.remote.replays, 0)
+
+    def test_receipt_handle_without_candidate_already_reserves_other_owner_target(self):
+        m = self.manager(); self.explicit_create(m)
+        def missing_inventory(args):
+            if args[:2] == ['terminal', 'list'] and self.remote.creates == 2:
+                raise self.failure('invalid_json')
+        self.remote.hook = missing_inventory
+        with self.assertRaises(self.mod.Blocked): self.explicit_create(self.manager(OWNER_B))
+        self.remote.hook = None
+        data = json.loads((self.state / 'bindings.json').read_text())
+        other = data['bindings'][self.mod.owner_key(OWNER_B)]
+        self.assertNotIn('creation_candidate', other)
+        self.assertEqual(other['creation_launch']['outcome']['handle'], 'term_2')
+        before = (self.state / 'bindings.json').read_bytes()
+        with self.assertRaises(self.mod.Blocked) as caught: m.rebind('term_2', 'inc_2')
+        self.assertEqual(caught.exception.category, 'busy')
+        self.assertEqual((self.state / 'bindings.json').read_bytes(), before)
+        self.assertEqual((self.remote.creates, self.remote.replays), (2, 0))
+
+    def test_status_inventory_runtime_mismatch_never_reserves_creation(self):
+        def changed(args):
+            if args[0] == 'status':
+                return {'ok': True, '_meta': {'runtimeId': 'replacement-runtime'},
+                        'result': {'runtime': {'runtimeId': 'replacement-runtime', 'state': 'ready',
+                            'reachable': True, 'appVersion': '1.4.229', 'capabilities': LAUNCH_CAPABILITIES}}}
+        self.remote.hook = changed
+        with self.assertRaises(self.mod.Blocked) as caught: self.explicit_create()
+        self.assertEqual(caught.exception.category, 'identity_changed')
+        self.assertFalse(self.state.exists())
+        self.assertEqual(self.remote.creates, 0)
+
+    def test_mismatched_replay_receipt_cannot_replace_original_operation_id(self):
+        self.unknown_launch()
+        def mismatch(args):
+            if '--retry-launch' in args:
+                return {'ok': True, '_meta': {'runtimeId': self.remote.runtime},
+                        'result': launch_result(self.remote.terminals[0], operation_id='1792370000000-' + 'a' * 32)}
+        self.remote.hook = mismatch
+        with self.assertRaises(self.mod.Blocked): self.manager().create(confirm=True, retry_launch=OPERATION_ID)
+        self.assertEqual(self.saved()['creation_launch']['operationId'], OPERATION_ID)
+        self.assertEqual(self.saved()['creation_launch']['replay_attempts'], 1)
+        self.assertNotIn('creation_candidate', self.saved())
+        self.assertNotIn('outcome', self.saved()['creation_launch'])
+
+    def test_retry_launch_is_rejected_before_native_calls_for_other_commands_or_without_confirm(self):
+        for action, flags in (('identity', []), ('ensure', []), ('send', []), ('rebind', []),
+                              ('create', ['--project', WORKTREE])):
+            with self.subTest(action=action):
+                error = io.StringIO()
+                args = ['session_binding', action, '--controller', 'codex', '--retry-launch', OPERATION_ID, *flags]
+                with patch.object(sys, 'argv', args), patch.object(self.mod, 'NativeOrca') as native, \
+                        patch('sys.stderr', error):
+                    self.assertEqual(self.mod.main(), 1)
+                native.assert_not_called()
+                self.assertEqual(json.loads(error.getvalue())['category'], 'invalid_input')
 
     def test_explicit_ensure_without_binding_has_no_native_or_state_side_effect(self):
         with self.assertRaises(self.mod.Blocked) as caught:
@@ -155,18 +537,21 @@ print(json.dumps({'ok':True,'result':r,'_meta':{'runtimeId':'runtime-cli'}}))
     def test_explicit_confirmation_persists_candidate_then_verifies_before_binding(self):
         states = []
         def observe(args):
-            if args[1] in ('create', 'wait', 'read'):
+            if args[1] in ('launch', 'wait', 'read'):
                 row = self.saved()
                 states.append((args[1], row['state'], 'creation_candidate' in row))
         self.remote.hook = observe
         first = self.explicit_create()
         self.assertEqual(first['handle'], 'term_1')
         self.assertEqual(self.saved()['state'], 'bound')
-        self.assertEqual(states[0], ('create', 'creating', False))
+        self.assertEqual(states[0], ('launch', 'creating', False))
         self.assertTrue(all(state == 'creating' and candidate for action, state, candidate in states[1:]))
-        command = next(args for args, _ in self.remote.calls if args[1] == 'create')
+        command = next(args for args, _ in self.remote.calls if args[1] == 'launch')
         self.assertEqual(command[command.index('--worktree') + 1], 'id:' + WORKTREE)
-        self.assertEqual(command[command.index('--command') + 1], 'claude --permission-mode auto')
+        self.assertEqual(command[:2], ['agent', 'launch'])
+        self.assertEqual(command[command.index('--agent') + 1], 'claude')
+        for flag in ('--command', '--prompt', '--model', '--effort', '--title', '--permission-mode'):
+            self.assertNotIn(flag, command)
         self.assertNotIn('--retry-request', command)
         self.assertEqual(self.remote.creates, 1)
 
@@ -175,7 +560,7 @@ print(json.dumps({'ok':True,'result':r,'_meta':{'runtimeId':'runtime-cli'}}))
         common = ['--controller', 'codex', '--session-id', OWNER_A['session_id'],
                   '--project-root', str(self.project), '--project', WORKTREE,
                   '--state-dir', str(self.state), '--orca', str(fixture)]
-        env = {**os.environ, 'CODEX_THREAD_ID': OWNER_A['session_id']}
+        env = self.fixture_env()
         def invoke(extra=()):
             return subprocess.run([sys.executable, '-B', str(TARGET), 'create', *common, *extra],
                                   capture_output=True, text=True, env=env, timeout=15)
@@ -194,7 +579,7 @@ print(json.dumps({'ok':True,'result':r,'_meta':{'runtimeId':'runtime-cli'}}))
         self.assertEqual(json.loads(duplicate.stderr)['category'], 'has_live_binding')
         self.assertEqual((self.root / 'created-cli').read_text(), 'create\n')
         calls = [json.loads(line) for line in (self.root / 'native-calls.jsonl').read_text().splitlines()]
-        self.assertEqual(sum(args[1] == 'create' for args in calls), 1)
+        self.assertEqual(sum(args[1] == 'launch' for args in calls), 1)
 
     def test_explicit_reservation_sync_failure_prevents_native_create(self):
         original = self.mod.os.fsync
@@ -216,7 +601,7 @@ print(json.dumps({'ok':True,'result':r,'_meta':{'runtimeId':'runtime-cli'}}))
 
     def test_explicit_failed_native_launch_is_not_resubmitted(self):
         def no_launch(args):
-            if args[1] == 'create': raise self.failure('launch', started=False)
+            if args[1] == 'launch': raise self.failure('launch', started=False)
         self.remote.hook = no_launch
         with self.assertRaises(self.mod.Blocked) as caught: self.explicit_create()
         self.assertEqual(caught.exception.category, 'create_unverified')
@@ -224,7 +609,7 @@ print(json.dumps({'ok':True,'result':r,'_meta':{'runtimeId':'runtime-cli'}}))
         self.remote.hook = None
         with self.assertRaises(self.mod.Blocked): self.explicit_create()
         self.assertEqual(self.saved()['creation_id'], identity)
-        self.assertEqual(sum(args[1] == 'create' for args, _ in self.remote.calls), 1)
+        self.assertEqual(sum(args[1] == 'launch' for args, _ in self.remote.calls), 1)
 
     def test_explicit_lost_receipt_does_not_infer_owner_or_recreate(self):
         self.remote.lose_create = True
@@ -239,14 +624,14 @@ print(json.dumps({'ok':True,'result':r,'_meta':{'runtimeId':'runtime-cli'}}))
 
     def test_explicit_bad_receipt_stays_pending_without_native_repeat(self):
         def malformed(args):
-            if args[1] == 'create':
+            if args[1] == 'launch':
                 return {'ok': True, '_meta': {'runtimeId': 'runtime-one'},
                         'result': {'terminal': {'handle': {'bad': True}, 'worktreeId': WORKTREE}}}
         self.remote.hook = malformed
         with self.assertRaises(self.mod.Blocked): self.explicit_create()
         self.remote.hook = None
         with self.assertRaises(self.mod.Blocked): self.explicit_create()
-        self.assertEqual(sum(args[1] == 'create' for args, _ in self.remote.calls), 1)
+        self.assertEqual(sum(args[1] == 'launch' for args, _ in self.remote.calls), 1)
         self.assertEqual(self.saved()['state'], 'creating')
 
     def test_explicit_saved_candidate_resumes_only_read_verification(self):
@@ -303,7 +688,7 @@ print(json.dumps({'ok':True,'result':r,'_meta':{'runtimeId':'runtime-cli'}}))
         m = self.manager(); self.explicit_create(m)
         def legacy(row):
             row.update(state='creating')
-            row.pop('handle', None); row.pop('incarnation', None)
+            row.pop('handle', None); row.pop('incarnation', None); row.pop('creation_launch', None)
         self.change_row(legacy)
         before = (self.state / 'bindings.json').read_bytes()
         for action in (lambda: self.explicit_create(m), m.ensure,
@@ -315,7 +700,7 @@ print(json.dumps({'ok':True,'result':r,'_meta':{'runtimeId':'runtime-cli'}}))
 
     def test_explicit_late_create_receipt_cannot_overwrite_changed_intent(self):
         def drift(args):
-            if args[1] == 'create':
+            if args[1] == 'launch':
                 self.change_row(lambda row: row.update(creation_id='99999999-9999-4999-8999-999999999999'))
         self.remote.hook = drift
         with self.assertRaises(self.mod.Blocked): self.explicit_create()
@@ -408,7 +793,7 @@ print(json.dumps({'ok':True,'result':r,'_meta':{'runtimeId':'runtime-cli'}}))
         fixture = self.cli_fixture()
         common = ['--controller', 'codex', '--session-id', OWNER_A['session_id'],
                   '--project-root', str(self.project)]
-        env = {**os.environ, 'CODEX_THREAD_ID': OWNER_A['session_id']}
+        env = self.fixture_env()
         for i, selector in enumerate(('repo::', '::/path', 'repo::relative')):
             with self.subTest(selector=selector):
                 case = self.root / ('selector-' + str(i)); case.mkdir()
@@ -436,8 +821,8 @@ print(json.dumps({'ok':True,'result':r,'_meta':{'runtimeId':'runtime-cli'}}))
         other_row = copy.deepcopy(saved['bindings'][self.mod.owner_key(OWNER_B)])
         target = copy.deepcopy(self.remote.terminals[0]); self.remote.draft = ''
         def stale_receipt(args):
-            if args[1] == 'create':
-                return {'ok': True, '_meta': {'runtimeId': self.remote.runtime}, 'result': {'terminal': target}}
+            if args[1] == 'launch':
+                return {'ok': True, '_meta': {'runtimeId': self.remote.runtime}, 'result': launch_result(target, operation_id='1792370000000-00000000000000000000000000000002')}
         self.remote.hook = stale_receipt
         with self.assertRaises(self.mod.Blocked) as caught: self.explicit_create()
         self.assertEqual(caught.exception.category, 'busy')
@@ -453,7 +838,7 @@ print(json.dumps({'ok':True,'result':r,'_meta':{'runtimeId':'runtime-cli'}}))
         self.assertEqual(caught.exception.category, 'busy')
         self.assertEqual((self.state / 'bindings.json').read_bytes(), before)
         self.assertEqual(len(self.remote.calls), calls)
-        self.assertEqual(sum(args[1] == 'create' for args, _ in self.remote.calls), 2)
+        self.assertEqual(sum(args[1] == 'launch' for args, _ in self.remote.calls), 2)
 
     def test_repeated_ensure_creates_only_once(self):
         first = self.manager().create(confirm=True)
@@ -687,22 +1072,23 @@ print(json.dumps({'ok':True,'result':r,'_meta':{'runtimeId':'runtime-cli'}}))
             with self.assertRaises(ValueError): self.mod.resolve_owner('codex', OWNER_B['session_id'])
 
     def test_legacy_receipt_adoption_is_not_an_available_mutation(self):
-        result = subprocess.run([sys.executable, '-B', str(TARGET), 'ensure', '--adopt-terminal', 'foreign'], capture_output=True)
+        result = subprocess.run([sys.executable, '-B', str(TARGET), 'ensure', '--adopt-terminal', 'foreign'], capture_output=True, env=self.fixture_env())
         self.assertNotEqual(result.returncode, 0)
         self.assertFalse(self.state.exists())
 
     def test_parallel_processes_create_and_submit_at_most_once(self):
         # Real helper processes and flock; only the external CLI is emulated.
         fake = self.root / 'orca-fixture'
-        fake.write_text('''#!/usr/bin/env python3
+        fake.write_text('#!' + sys.executable + '\n' + '''
 import json,sys,pathlib,time
 p=pathlib.Path(__file__).parent
-args=sys.argv[1:]; action=args[1]
+args=sys.argv[1:]; action=args[1] if args[0]!='status' else 'status'
 t={'handle':'term-process','incarnationId':'inc-process','worktreeId':'repo::/home/box/orca/projects/hello','agentIdentity':'claude','connected':True,'writable':True,'orphaned':False}
-if action=='list': r={'terminals':[t] if (p/'created').exists() else [],'truncated':False}
-elif action=='create':
+if action=='status': r={'runtime':{'state':'ready','reachable':True,'runtimeId':'runtime-process','appVersion':'1.4.229','capabilities':['agent.launch.v2','agent.launch.replay-required.v1','agent.launch.local-presentation.v1']}}
+elif action=='list': r={'terminals':[t] if (p/'created').exists() else [],'truncated':False}
+elif action=='launch':
  with (p/'created').open('a') as f: f.write('create\\n')
- time.sleep(.25); r={'terminal':t}
+ time.sleep(.25); r={'operationId':'1792370000000-00000000000000000000000000000001','outcome':{'kind':'terminal','handle':t['handle']},'worktreeId':t['worktreeId'],'receipt':{'mode':'terminal'}}
 elif action=='wait': r={'wait':{'satisfied':True}}
 elif action=='read': r={'terminal':{'handle':'term-process','tail':['────────','❯','────────','auto mode on'],'source':'screen' if '--screen' in args else 'stream','truncated':False,'limited':False,'latestCursor':'1'}}
 elif action=='send':
@@ -715,7 +1101,7 @@ print(json.dumps({'ok':True,'result':r,'_meta':{'runtimeId':'runtime-process'}})
         common = ['--controller', 'codex', '--session-id', OWNER_A['session_id'],
                   '--project-root', str(self.project), '--worktree', WORKTREE,
                   '--state-dir', str(self.state), '--orca', str(fake)]
-        env = {**os.environ, 'CODEX_THREAD_ID': OWNER_A['session_id']}
+        env = self.fixture_env()
         def concurrent(command, extra=()):
             procs = [subprocess.Popen([sys.executable, '-B', str(TARGET), command, *common, *extra],
                      stdout=subprocess.PIPE, stderr=subprocess.PIPE, env=env) for _ in range(4)]
@@ -847,7 +1233,7 @@ print(json.dumps({'ok':True,'result':r,'_meta':{'runtimeId':'runtime-process'}})
         m = self.manager(); m.create(confirm=True)
         calls = []
         def check(args):
-            if args[1] in ('list', 'wait', 'read', 'send', 'create'):
+            if args[1] in ('list', 'wait', 'read', 'send', 'launch'):
                 with self.mod.Registry(self.state): calls.append(args[1])
         self.remote.hook = check
         m.send('task-one', 'main', 'text'); m.finish('task-one'); m.ensure()
@@ -932,7 +1318,7 @@ print(json.dumps({'ok':True,'result':r,'_meta':{'runtimeId':'runtime-process'}})
     def test_other_owner_updates_survive_create_and_send_merge(self):
         m = self.manager()
         def insert_other(args):
-            if args[1] in ('create', 'send'):
+            if args[1] in ('launch', 'send'):
                 with self.mod.Registry(self.state) as db:
                     db.data['bindings'][self.mod.owner_key(OWNER_B)] = {'owner': OWNER_B, 'note': args[1]}
                     db.save()
@@ -1207,7 +1593,7 @@ print(json.dumps({'ok':True,'result':r,'_meta':{'runtimeId':'runtime-process'}})
 
     def test_malformed_create_identity_retains_uncertain_reservation(self):
         def malformed(args):
-            if args[1] == 'create':
+            if args[1] == 'launch':
                 return {'ok': True, '_meta': {'runtimeId': 'runtime-one'}, 'result': {'terminal':
                     {'handle': {'invalid': True}, 'incarnationId': 'inc', 'worktreeId': WORKTREE}}}
         self.remote.hook = malformed

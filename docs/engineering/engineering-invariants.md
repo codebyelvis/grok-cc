@@ -6,7 +6,7 @@
 
 ## 创建与发送分开计数
 
-本地最多一次创建提交只约束同一保留 registry、真实 owner 和目的地内的每个创建意图。它不是原生 caller-key 去重，也不是跨客户端、跨 registry 或 exactly-once；持久预约之后即使子进程没有启动，也允许永远保持未知。不得删除或切换状态目录来恢复“重试机会”。
+本地每个创建意图只提交一次新启动，只约束同一保留 registry、真实 owner 和目的地。Orca≥1.4.229新协议只在已保存原生operationId及unknown/retrySafe证据时，允许原host/context显式重放同ID一次；重放先持久消耗额度，不转为新启动。不承诺跨客户端、跨registry或exactly-once。持久预约之后即使子进程没有启动，也允许永远保持未知；旧无ID pending不能升级成重放权限。不得删除或切换状态目录来恢复“重试机会”。
 
 发送的 task 累计上限另为两次，main、合法 export 和明确 not_sent 的重试共用；list/read/wait 的预算与计数不消耗模型派发额度。创建的“未启动也不重提”不能套成发送重试规则，发送的 not_sent 规则也不能反向用于创建。
 
@@ -14,7 +14,9 @@
 
 不可达、暂时断连、忙碌、非 auto、裁剪清单都不证明原实例消失。完整清单仍须有安全、唯一的 handle 和有效 runtime；云端 selector 要求非空 repo ID 与绝对路径。无绑定时 ensure 只核验失败，创建预览零落盘，真实新建仍须用户选择具体目标。
 
-create receipt 仅能产生 pending candidate。保存后经完整身份、存活、可写、空闲、auto 和输入核验，重锁检查同一意图及占用后才可 bound。其他 owner 的精确 pending candidate 同样占用目标；在候选保存、恢复及最终绑定阶段都要检查。
+agent launch先保存原生operationId及outcome.kind/handle，再从完整清单取得精确handle的incarnation并保存pending candidate；任一回执都不等于bound。保存后经完整身份、存活、可写、空闲、auto 和输入核验，重锁检查同一意图及占用后才可bound。其他owner已保存handle但没有incarnation的launch outcome、以及精确pending candidate，同样占用目标；候选保存、恢复及最终绑定都要检查。structured聊天页与非auto终端保留pending，不改配置强制放行。
+
+创建前status/list必须同runtime、执行端ready/reachable且具备正式版本≥1.4.229和所需launch能力。原生JSON错误从stdout固定结构投影；operationId不从散文、stderr token或本地creation_id推断。只有kind/started、有限returncode/timeout、已知code及最小启动身份能落入安全诊断，launchRequest/cause/recoveryCommand等不保存。
 
 替换绑定前，creation_previous 中的 tasks/active 必须与 reservation 保存的旧任务一致。带旧任务却缺快照、缩水或状态漂移时保留原文件并阻断。旧 task 身份、累计次数与未知消息不能随创建、rebind、finish 或历史归档归零。
 
@@ -61,6 +63,10 @@ PY
 
 ## 回归入口
 
+外部进程替身必须形成闭合的执行边界：fixture用绝对路径和绝对Python shebang，helper子进程的PATH仅指向临时目录，ORCA_CLI_COMMAND默认指向不存在的哨兵文件。相对路径用字面量`./orca`测试，不能经`str(Path('./orca'))`变成会搜索系统PATH的`orca`。选定child cwd中的相对executable和相对PATH条目，必须在首次预检前解析/pin为同一绝对文件，预检与提交不能换程序。机械回归及来源见[执行上下文学习卡](../learning-candidates/2026-10-19-orca229-execution-context.md)。
+
+保存字段的类型检查须区分缺省与显式null；数值先校验边界，再交给可能转换float的有限性函数。合法JSON整数也可能大到令math.isfinite抛OverflowError。畸形outcome/diagnostic、超大或无限timeout均应在查询前返回结构化integrity_failure，保持原state，不让其他owner因同库坏记录收到traceback。
+
 下表是机制映射，不是新的测试框架。函数位于 [binding tests](../../scripts/tests/test_session_binding.py) 或 [packet tests](../../scripts/tests/test_task_packet.py)。
 
 | 不变量/错误反例 | 已有确定性回归 |
@@ -69,6 +75,10 @@ PY
 | 无效 intent/runtime/清单不能升级为证据；不完整 selector 零副作用 | test_explicit_candidate_requires_valid_saved_intent_identity；test_explicit_invalid_runtime_is_rejected_before_reservation；test_explicit_malformed_inventory_never_proves_prior_absence；test_explicit_incomplete_project_cli_is_rejected_before_any_side_effect |
 | 旧任务完整保留、历史禁止重放、同目标 rebind 不归零 | test_explicit_recovery_rejects_missing_or_inconsistent_previous_tasks；test_explicit_replacement_preserves_archived_task_identity_and_attempts；test_archived_task_cannot_replay_after_rebind；test_same_target_rebind_cannot_reset_task_history |
 | 精确 pending candidate 占用；并发和晚回执不能覆盖 | test_explicit_other_owner_pending_candidate_reserves_exact_target；test_other_owner_updates_survive_create_and_send_merge；test_late_receipt_does_not_overwrite_changed_intent；test_parallel_processes_create_and_submit_at_most_once |
+| 新协议先存handle再查incarnation；未有candidate也占用；structured不绑定 | test_launch_receipt_is_durable_before_inventory_and_incarnation_lookup；test_receipt_handle_without_candidate_already_reserves_other_owner_target；test_structured_outcome_stays_pending_without_terminal_verification_or_replay |
+| 同ID重放先持久计数、并发限一次；runtime/context/无ID不能绕过 | test_real_cli_replays_stdout_unknown_once_under_concurrent_callers；test_replay_reservation_fsync_failure_prevents_native_replay；test_replay_requires_saved_id_confirm_original_context_and_budget；test_legacy_no_id_pending_is_unchanged_after_upgrade_even_with_retry_flag |
+| stdout安全投影；错误ID/能力/版本不能新建或扩大权限 | test_stdout_native_error_contract_is_minimized_not_parsed_from_prose；test_mismatched_replay_receipt_cannot_replace_original_operation_id；test_status_inventory_runtime_mismatch_never_reserves_creation；test_launch_preflight_rejects_old_missing_capability_and_unready_before_reservation |
+| 预检与启动同一child-cwd executable；fixture不回退真实CLI；畸形null先结构化阻断 | test_relative_executable_is_pinned_from_child_cwd_before_every_native_call；test_fixture_environment_disables_unselected_native_cli；test_null_saved_outcome_is_blocked_as_json_before_other_owner_queries |
 | 原始字节、坏 hash/截断和 legacy 降级继续阻断 | test_non_lf_hunk_payload_checks_and_applies；test_cli_preserves_patch_newlines；test_bad_hash_count_truncation_and_damaged_candidate_block；test_legacy_is_opt_in_and_cannot_downgrade_corruption |
 | 外发预算、媒体 override 与证据型摘要 | test_prepare_frontloads_same_utf8_budget_as_render；test_media_override_is_only_an_extension_override；test_summary_explicit_evidence_is_short_and_not_a_verdict |
 

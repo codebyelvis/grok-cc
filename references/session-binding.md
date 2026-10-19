@@ -27,17 +27,37 @@ python3 <skill-dir>/scripts/session_binding.py finish <相同参数> --task-id <
 python3 <skill-dir>/scripts/session_binding.py create <相同会话与目标参数> --project <完整云端worktreeID>
 ```
 
-`--project`为已发现的完整`repoId::path`，可带`id:`前缀；Mac根目录仍由`--project-root`指定。可选`--worktree`须与project相同；其他命令不接受project/confirm。无confirm只读现有registry和完整native list，返回claude/auto/精确worktree位置计划、至多20项白名单inventory、同项目总数及限量标记；不创建状态目录、lock、intent或终端，不按空闲程度认领目标。
+`--project`为已发现的完整`repoId::path`，可带`id:`前缀；Mac根目录仍由`--project-root`指定。可选`--worktree`须与project相同；其他命令不接受project/confirm/retry-launch。无confirm只读现有registry、完整native list和status，返回claude/所需auto/精确worktree位置计划、至多20项白名单inventory、同项目总数及限量标记；不创建状态目录、lock、intent或终端，不按空闲程度认领目标。
 
 只有用户明确选择该目标的新建后，才可执行同一命令加`--confirm`。确认时重新核对当前事实：无active任务、无未解决消息和creating；已有live绑定返回has_live_binding。替代创建须在相同runtime完整清单中证明原实例确已消失；列表缺页、缺失/重复handle、身份漂移、临时断连、busy或非auto都不能证明消失。不可达先等一至两分钟再核查原操作。
 
-helper在锁内重读/比对后，先以fsync/replace/目录fsync持久保存稳定creation_id和state=creating，再锁外最多调用一次公开terminal create，启动claude auto。保存失败零native调用。保证仅覆盖使用同一保留受管registry的本helper；没有原生caller-key去重，也不保证跨客户端/registry或exactly-once。不得通过删除、切换state目录或换身份逃避pending。
+执行端status须报告相同runtime、ready/reachable、正式版本≥1.4.229，以及`agent.launch.v2`、`agent.launch.replay-required.v1`、`agent.launch.local-presentation.v1`三项能力。缺失、旧版本、预发行版或status/list身份不一致时不预约、不启动，不回退terminal create。
 
-回执的精确runtime/handle/incarnation/worktree先保存为creation_candidate，验证候选与本地intent有效后，才按完整list、claude、connected/writable/non-orphaned、idle、auto和空输入/精确首次提示核验；成功后重锁比对并绑定。旧绑定及任务归档，历史task身份与累计提交额度继续有效。回执不是绑定成功证据。
+helper在锁内重读/比对后，以fsync/replace/目录fsync持久保存稳定creation_id、state=creating与creation_launch上下文，再锁外调用一次公开`agent launch --agent claude --worktree id:<完整ID>`。不传prompt/model/effort/permission参数，不改配置。原生进程使用已保存的可执行文件实际路径和规范化Mac项目目录；启动外层timeout为180秒，容纳CLI内的查询与启动阶段。保存失败零启动调用；没有自动变异重试。不保证跨客户端/registry或exactly-once，不得删除、切换state目录或换身份逃避pending。
+
+原生回执先在creation_launch保存最小operationId和outcome.kind/handle，绝不保存receipt.detail、prompt或原始响应。Orca按既有设置选择structured聊天页或terminal；structured返回unsupported_contract并保持pending，不对它调用terminal send，也不强制改为终端。终端回执不含incarnation；仅从同runtime完整清单中精确handle对应的Claude取得incarnation，再保存creation_candidate。已保存handle但尚无candidate时同样占用目标，其他owner不能认领。
+
+候选仍须核对connected/writable/non-orphaned、idle、auto和空输入/精确首次提示，成功后重锁比对并绑定。非auto或真实草稿保留pending，不为通过检查修改权限/输入。旧绑定及任务归档，历史task身份与累计提交额度继续有效。回执不是绑定成功证据。
 
 恢复前须核对creation_previous的任务及active状态与reservation保留内容一致；带旧任务却缺少快照、任务缩水或状态不一致均保留原文件并阻断。其他owner已经持久保存的精确candidate也占用该目标，在接收候选、恢复核验及最终绑定时都不能认领。
 
-一旦reservation持久化，即使原生进程未启动、超时、回执损坏/丢失，也不能再次提交。保存候选后核验失败返回create_unverified，后续同目标confirm只能继续只读核验该精确candidate；完全无candidate保持pending，不根据标题、时间或新终端猜归属。旧creating保持未知，不重置。pending仍阻止ensure/send/rebind；finish也不能解锁它。
+一旦reservation持久化，即使原生进程未启动、超时、回执损坏/丢失，也不能重新启动。后续同目标confirm只继续已保存精确回执/candidate的只读核验；未保存任何精确回执且没有下述原生重放证据时保持pending，不根据标题、时间或新终端猜归属。pending仍阻止ensure/send/rebind；finish也不能解锁它。
+
+## 显式启动重放
+
+仅当helper从本次原生stdout JSON错误取得`agent_session_operation_unknown`，且其data明确包含`launchOutcome=unknown`、布尔`retrySafe=true`及合法operationId时，才持久保存重放依据。ID必须来自这一固定结构，不从错误散文、stderr token、recoveryCommand或任意嵌套字段提取，不在本地生成。creation_id是本地预约ID，不能用作原生operationId。
+
+用户明确选择对这一次未知启动重放后，使用同一组create参数：
+
+```text
+python3 <skill-dir>/scripts/session_binding.py create <相同会话与目标参数> --project <原完整云端worktreeID> --confirm --retry-launch <已保存原生operationId>
+```
+
+只允许一次显式重放，helper先检查保存的协议/ID、无已知成功结果或candidate、无active/unknown消息、原owner/project/worktree/environment/runtime/executable/cwd及完整清单/执行端能力，再持久消耗replay_attempts，才给同一`agent launch`附加`--retry-launch <同ID>`。同时调用也不能重复重放；fsync失败零重放调用。即使本地调用失败，次数也不能重置。native负责同ID的启动账本；helper不把重放变成新启动。
+
+重放仍未知、过期、返回不同ID或身份漂移时保持pending，不删除ID、不重放第二次，也不去掉retry-launch重启。已知terminal回执只继续只读核验；已知structured结果禁止重放。**旧pending没有operationId时，升级后即使ready、清单为空，也不能套用此入口**，不补造creation_launch。此能力不是发送重试；`send --retry-request`继续阻断。
+
+BLOCKED可返回diagnostic（本地枚举kind、started、有限returncode/timeout、已知code）及最小launch身份/replay_available提示，后续恢复保留安全原因。原始message/stderr、launchRequest、cause、恢复命令、配置及源码不输出、不落registry；提示可重放不等于用户已授权。
 
 ## 状态、次数与恢复
 
@@ -56,9 +76,9 @@ helper在锁内重读/比对后，先以fsync/replace/目录fsync持久保存稳
 
 ## 只读退避
 
-list/read/wait仅对限定瞬时错误按2、5、15、30秒（之后封顶30）退避；默认`--retry-budget-s 300`。正预算由一次helper命令整条只读链共享，不在verify/idle内部刷新；每次调用timeout不超过剩余预算。0关闭自动重试，各必要查询仍仅调一次且有有限timeout。read_attempts与模型提交attempts分开，不把只读轮询混为模型工作量。
+status/list/read/wait仅对限定瞬时错误按2、5、15、30秒（之后封顶30）退避；默认`--retry-budget-s 300`。正预算由一次helper命令整条只读链共享，不在verify/idle内部刷新；每次调用timeout不超过剩余预算。0关闭自动重试，各必要查询仍仅调一次且有有限timeout。read_attempts与模型提交attempts分开，不把只读轮询混为模型工作量。
 
-只读查询和sleep不持registry锁；重新加锁后重载并核对相关owner/目标/task/intent，漂移停止，不能用旧整库覆盖其他owner更新。send/create先在锁内原子记录意图，再仅调用一次；send的子进程timeout为wait-submit +45秒（当前60秒）。预算到期仅报告，不切身份、开终端或重启网络。
+只读查询和sleep不持registry锁；重新加锁后重载并核对相关owner/目标/task/intent，漂移停止，不能用旧整库覆盖其他owner更新。send/首次launch/显式重放分别先在锁内原子记录意图，再单次调用；send的子进程timeout为wait-submit +45秒（当前60秒）。预算到期仅报告，不切身份、开终端或重启网络。
 
 ## 显式换绑
 
@@ -78,13 +98,13 @@ BLOCKED在stderr输出JSON，包含category、retryable、task累计attempts和r
 | --- | --- |
 | unreachable，只读调用 | 原绑定内预算退避；耗尽停止报告；创建前不可达等一至两分钟再查原操作，不推断实例消失或未送达 |
 | has_live_binding | 保留已有绑定，使用ensure核验；不另建终端 |
-| create_unverified | 保留reservation/candidate，绝不再次提交；有精确candidate时仅继续只读核验，否则停止调查未知结果 |
+| create_unverified | 保留reservation/回执/candidate；已知精确handle仅继续只读核验；仅符合显式启动重放全部门禁才可同ID重放一次，旧无ID继续pending |
 | busy、锁占用、真实草稿 | 保留草稿，稍后只读核对原绑定；不清空输入、不换终端 |
 | identity_changed | 停止发送，核对runtime/handle/incarnation；只有符合门禁且用户确认后才显式rebind |
 | uncertain_send / creating | 保留intent/白名单receipt；消息可只读reconcile，创建按candidate规则核查；不重发、不finish、不换ID/目标 |
 | not_sent且task还有次数 | 同ID同文显式send，重做verify/idle；第三次阻断 |
 | integrity_failure、补丁缺页/截断 | 停止应用并报告；不拼接猜写或循环导出 |
-| unsupported_contract | 缺官方契约，停止对应能力；不猜参数、不直接原生send绕过 |
+| unsupported_contract | 缺能力/版本、structured聊天页或发送retry缺契约，停止对应能力；不改配置或直接原生命令绕过 |
 | invalid_input / secret命中 | 缩小/修正白名单及文本；不回显secret，不放宽安全边界 |
 | 模型safeguards拦截 | 按实际provider错误报告，停止；不换模型/身份/编码改写绕过 |
 

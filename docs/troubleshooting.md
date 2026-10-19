@@ -20,11 +20,15 @@
 
 `ensure`无绑定时也不创建；先用`create --project <完整云端worktreeID>`只读展示目标和计划，用户明确选择该目标的新建后才可加`--confirm`。已有live绑定阻止新建；不可达先等一至两分钟核查原操作，只有相同runtime完整清单证明原实例消失、无active/unknown且用户确认后才可替代创建。
 
-创建先持久保存reservation，随后同一registry每intent最多一次native提交，没有原生caller-key去重。即使子进程未启动也不重提；未知回执保留create_unverified，不猜终端归属。保存过精确candidate时，重复confirm只能继续只读核验，不再create；无candidate或旧creating继续保留未知。损坏intent/candidate或缺失/重复清单身份不能用于证明消失，不删除/切换state绕过。
+创建先持久保存reservation，再按Orca≥1.4.229公开`agent launch`启动Claude，不传prompt或修改设置。原生回执先保存operationId与精确handle，再从完整清单取得incarnation；非auto或草稿不能通过，structured聊天页保留pending并返回unsupported_contract。版本、能力和status/list runtime不一致时不启动，不回退terminal create。
+
+未知回执保留create_unverified；重复confirm只继续已保存精确回执/candidate的只读核验，不猜终端归属。只有已保存原生unknown+retrySafe+合法operationId，且用户选择重放时，才按[显式启动重放](../references/session-binding.md#显式启动重放)在原host/cwd/executable附加同ID，限一次且先落盘计数。没有ID、legacy creating、过期/再次未知、runtime变化都不能重新启动或换ID。损坏intent/candidate或缺失/重复清单身份不能证明消失，不删除/切换state绕过。
+
+BLOCKED的diagnostic仅含安全枚举与有限退出码/timeout，launch只含最小身份与replay_available；不回显原始错误。原生JSON错误位于stdout，不能只从stderr判断受理状态。进程timeout不等于远端未受理；调整为180秒只是新协议的外层预算，不证明历史故障来自超时。
 
 accepted/未知的同 task/message/文本调用只恢复已有记录；仅证明子进程未启动才可 not_sent 同文显式重试，task 累计最多2次，含合法格式导出。`sending` 仍表示未知，不能删除 registry、改 task_id、换终端重试。新增 reconcile 只查既有绑定/cursor，marker回显、空闲/空流不证明未送达；显式 rebind 只在无active/unknown且用户确认精确目标后执行，归档旧绑定，不自动换绑或reset。
 
-list/read/wait在命令共享默认300秒预算内退避，read_attempts与模型提交attempts分开。send/create不自动重试。BLOCKED JSON区分unreachable、busy、identity_changed、uncertain_send等；retryable不是自动提交授权。原生request retry缺官方契约，任何Orca调用前unsupported；完整[错误→下一步决策表](../references/session-binding.md#错误--下一步)。
+status/list/read/wait在命令共享默认300秒预算内退避，read_attempts与模型提交attempts分开。send/launch不自动重试。BLOCKED JSON区分unreachable、busy、identity_changed、uncertain_send等；retryable不是自动提交授权。原生发送request retry缺官方契约，任何Orca调用前unsupported；完整[错误→下一步决策表](../references/session-binding.md#错误--下一步)。
 
 ## 精确会话与完整产物
 

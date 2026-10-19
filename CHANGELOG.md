@@ -2,6 +2,13 @@
 
 作者：elvis。
 
+## 0.1.0.dev4 — 2026-10-19，源码候选
+
+- 显式create改用Orca1.4.229公开agent launch，不带prompt或模型/设置变更；执行端版本、能力与runtime先核对。原生operationId及精确handle先落盘，再取得incarnation并执行原有Claude/auto/空闲/输入核验；structured聊天页保留pending。
+- 只对已保存原生unknown/retrySafe/operationId，允许原目标、runtime、executable与cwd显式重放同ID一次；先持久计数、无自动重试。旧无ID pending跨升级保持原样，发送retry-request仍不支持。
+- stdout JSON错误做白名单诊断与最小启动身份投影；原始message/stderr、launchRequest/cause/recoveryCommand不输出或入registry。新启动外层timeout为180秒，不将其视为历史故障根因。
+- 在真实私有文件、锁、helper进程和外部Orca替身边界验证，保留原packet回归。本版本仅源码准备，未发布/安装，不代表真实云端通过。
+
 ## 0.1.0.dev3 — 2026-10-17
 
 - prepare/render共用最终UTF-8 prompt默认120KiB预算与max-bytes，prepare写packet之前阻断过限；分别报告prompt/packet字节和明确粗估token。
