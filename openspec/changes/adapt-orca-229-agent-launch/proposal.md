@@ -2,6 +2,35 @@
 
 作者：elvis。
 
+## Current approved amendment — 2026-10-20
+
+The user explicitly selected plan (a): new instances use
+`terminal create --command "claude --permission-mode auto"`, affecting only that
+instance. After the fixed cloud patch failed its documentation dry-run, the user
+requested “开始闭环吧 推送git 本地更新”. This authorizes source integration,
+verification, scoped commits, normal push to existing origin/master, and local
+activation after publication. This supersedes the historical source-only/Git/
+installation exclusions below and the launcher choice for **new reservations**.
+Reuse existing master as in the approved integration follow-up; do not create
+branches. Unrelated requirement drafts remain untouched.
+
+New reservations use `terminal.create.claude-auto.v1`, without native operationId
+or replay authority; failed or unverifiable outcomes remain pending. Existing
+`agent.launch.v2` records keep their saved protocol and same-ID replay contract.
+Retain the accepted installed placeholder prerequisite, its explicit-draft guard,
+related retained source regressions and project learning. No global
+agentDefaultArgs/native config, live registry, pending/creating/bindings or
+existing CC terminal may be modified. No real create/replay/send or model request
+is authorized; real new-instance acceptance still awaits user confirmation.
+
+Use strict evidence: real helper processes, temporary state/files/locking and
+external CLI fixtures, separate independent Codex implementation/final Reviews,
+and published-revision staging plus actual installed-suite/hash/alias/nonpayload
+verification. These facts cannot establish real cloud behavior. The existing
+plan/status/tasks retain the current evidence and assignments.
+
+The sections below record historical phases; this amendment controls conflicts.
+
 ## Why
 
 The version-matched Orca 1.4.229 guide starts agents through `agent launch`, not a shell command in `terminal create`. Its public replay contract carries an operationId. The existing helper both misses that contract and discards safe native failure classification when a creation fails. A legacy unknown creation cannot be recovered by guessing ownership.

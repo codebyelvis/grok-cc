@@ -1,6 +1,6 @@
 # Orca 1.4.229 Agent Launch Implementation Plan
 
-> **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:executing-plans inline. No staging, commits, pushes, installation or real Orca execution is authorized.
+> **For agentic workers:** Execute inline under the Router's current contract. The 2026-10-20 amendment below supersedes historical source/Git/installation exclusions. Real Orca mutations remain forbidden.
 
 **Goal:** Prepare a source-only launch/replay compatibility candidate while preserving all existing uncertainty and ownership protections.
 
@@ -9,6 +9,77 @@
 **Tech Stack:** Python stdlib, unittest, local executable Orca fixture, existing OpenSpec CLI.
 
 **Spec:** `openspec/changes/adapt-orca-229-agent-launch/design.md` and `specs/orca-agent-launch/spec.md`.
+
+## Current execution amendment — 2026-10-20
+
+Goal: publish/install approved plan (a), retaining the installed placeholder
+prerequisite and related uncommitted safety regressions. Reuse existing master,
+base `d094ffe`, and this OpenSpec change. Fixed cloud diff SHA256:
+`05791a8e5f26cd11461c84e2ebba2e3f9895a7123076febdf0489db5305318b9`.
+Its failed reference hunk is baseline wording drift; integrate reviewed source,
+never force-patch the installation. Baseline make check: 131 tests PASS.
+
+Allowed: helper/tests, SKILL/reference, troubleshooting/invariants/recovery
+learning card, VERSION/CHANGELOG/manifest, this plan and existing change's
+proposal/design/spec/tasks/status. Fixed eight-file payload; packet code/tests,
+AGENTS and requirement drafts are outside edits. No global config, live state
+or real cloud operations. Private source preimage and draft hashes are saved.
+
+Controller/executor: Codex `mode-auto-controller`, control-plane/control-plane-high.
+Preflight/implementation: Codex `mode-auto-implementation`,
+independent-reviewer/control-plane-high; distinct from controller/executor;
+purpose readiness then implementation safety; authority governed-review-evidence.
+Final: Codex `mode-auto-final`, independent-reviewer/control-plane-high, distinct
+from controller/executor and implementation reviewer; purpose final source,
+publication and installation acceptance; authority governed-review-evidence.
+Neither reviewer owns transitions/completion or authorizes a real-instance test.
+
+### Amendment task 1: Source integration and regression
+
+Interfaces: preserve `BindingManager.create(confirm=False, retry_launch=None)`.
+New records use `terminal.create.claude-auto.v1`; old agent records retain their
+protocol. Reply is `result.terminal.handle` and `_meta.runtimeId`; saved outcome
+has no operationId/retrySafe. No second registry/runner or new dependency.
+
+- [x] Independent FULL_PREFLIGHT: plan/contract SHA, exact scope, existing branch,
+  source/preimage/draft preservation, Git authority, isolation and rollback.
+- [x] Add prerequisite and auto-path regressions before runtime edits. RED must
+  show old code cannot bind prerequisite placeholders or submit the exact
+  per-instance command. Legacy tests keep their original protocol; subprocess
+  fixtures exercise the actual production default.
+- [x] Minimum prerequisite and launch dispatch. Cover loss/timeout/bad reply,
+  bypass/draft/identity refusal, legacy replay/no-ID, receipt-before-inventory,
+  occupancy and concurrency. Preserve retained tests even above expected136.
+- [x] Synchronize docs/version0.1.0.dev5 and reviewed payload hashes. Run
+  `make check`, `openspec validate adapt-orca-229-agent-launch --strict`, and
+  `git diff --check`. Inspect complete diff and stale launcher claims.
+- [x] Independent implementation Review reruns critical checks and one
+  adversarial temporary-state probe. Findings require RED/GREEN and re-review.
+
+### Amendment task 2: Publish and activate
+
+- [x] Resolve project learning in existing recovery card/invariant/test mapping.
+- [ ] Fresh final source verification and distinct final Review of actual full
+  diff, learning/sensitive scope and an independent safety probe.
+- [ ] Stage only reviewed paths, Chinese Conventional Commit without coauthor,
+  verify staged contents, normal push to existing `origin master`. Refuse remote
+  divergence; no force, reset or clean.
+- [ ] Existing skill installer fetches the fixed published revision into private
+  staging; run `make check`. Preserve installed bytes/modes/inventory/aliases
+  outside discovery and reject source/preimage drift.
+- [ ] Existing rsync copies only eight manifest files, without delete. Verify
+  actual aliases, hashes, nonpayload and installed unittest; final reviewer
+  independently checks installation and claim boundaries.
+- [ ] Reconcile status/tasks, publish necessary closeout metadata and verify
+  remote HEAD plus workspace residue. Real new-instance verification awaits user.
+
+Rollback: source preimage and accepted install preimage are retained privately.
+Restore only after no-later-drift checks within explicit rollback authority;
+never discard unknown work. Stop on changed protected scope, incompatible native
+contract, required new permissions, remote divergence, source/install drift,
+sensitive content or failed Review. Existing pending recovery stays deferred.
+
+The sections below are historical records, not current exclusions.
 
 ## Global Constraints
 - Baseline: `4ea6ddb8307bbb99ee6ad2efc4833094d59b4c6a`; isolated detached worktree only.

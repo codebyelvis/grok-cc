@@ -1,3 +1,17 @@
+## 2026-10-20 approved plan (a), publication and local activation
+
+- [x] Amend existing contract/plan; independent readiness Review.
+- [x] Retain prerequisite and safety regressions; RED/GREEN for exact per-instance create and saved protocols.
+- [x] Synchronize helper/reference/docs/version/manifest; make check, strict validation and diff checks.
+- [x] Independent implementation Review; resolve findings and project learning.
+- [ ] Fresh final source verification and distinct final Review.
+- [ ] Scoped Chinese commits and normal push to existing origin/master; verify revision.
+- [ ] Published-revision staging, preimage and eight-file activation; aliases/hash/nonpayload/installed-suite and independent acceptance.
+- [ ] Publish closeout metadata; preserve deferred real new-instance verification boundary.
+
+Historical task records follow. Real CC create/send, shared registry and existing
+pending/creating/bindings remain outside this amendment's acceptance.
+
 ## Source candidate
 - [x] Identify committed installed-code baseline and establish isolated source worktree.
 - [x] Confirm baseline `make check`: 112 tests pass.

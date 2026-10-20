@@ -10,11 +10,25 @@
 
 发送的 task 累计上限另为两次，main、合法 export 和明确 not_sent 的重试共用；list/read/wait 的预算与计数不消耗模型派发额度。创建的“未启动也不重提”不能套成发送重试规则，发送的 not_sent 规则也不能反向用于创建。
 
+## 看见回复不等于受理
+
+宿主 status 列出 `agent.launch.v2` 只说明执行端宣称有该能力。Mac CLI 提交的 client capability 是另一层。客户端集合缺这项时，服务端可以在写出 operationId 之前拒绝 launch。没有 operationId 的 creating 保持 unknown：不能重放，不能改记成无副作用，也不能再新建。打印能力列表时被截断的前几项，不能当成能力缺失。grok-cc 不修改 Orca 安装包来补这项；那要单独授权。
+
+每次原生调用都带上已保存的 `--environment`。不带该环境的 status 或 read 可能打到另一个 runtime，并对已绑定 handle 报 stale。先用同一 environment 复读，不新开终端。
+
+屏幕正文、结束标记、`tui-idle` 和 `input_accepted` 都不是受理。reconcile 只有在 stream 可读，且已保存 receipt 证明 accepted 时，才把 `sending` 改成 `accepted`。receipt 为空或 stream 没有形成受理证据时保持 `sending`。任一消息未 accepted 时 finish 拒绝。同一消息再次 send 只 resume，不第二次提交。提问回显里可能先出现标记；可见正文取到最后一处标记，并且只作为可见证据。
+
+启动提示是闭集。`Try "how does <filepath> work?"` 只在没有任务历史时视为空输入。bypass 或新的占位提示不能靠改权限、清空输入来放行。
+
+本地 claudex 的 settings、网关和登录不复制到云端 CC。云端 CC 的家目录配置也不覆盖本地 claudex。安装只替换 bundle 的 8 个文件，并保留 native 配置。
+
 ## 存在性、所有权与完整快照
+
+新预约只用`terminal create --command "claude --permission-mode auto"`，不传裸claude，不改全局agentDefaultArgs。先持久reservation，再保存同runtime精确handle，最后完整清单和auto/无bypass/草稿/归属核验。新terminal.create.claude-auto.v1没有operationId/replay，失败或丢回执继续pending；已有agent.launch.v2预约保留原协议，不因升级改写。具体命令和预览必须一致。对应回归为AutoLaunchTests及实际helper CLI确认/并发测试。
 
 不可达、暂时断连、忙碌、非 auto、裁剪清单都不证明原实例消失。完整清单仍须有安全、唯一的 handle 和有效 runtime；云端 selector 要求非空 repo ID 与绝对路径。无绑定时 ensure 只核验失败，创建预览零落盘，真实新建仍须用户选择具体目标。
 
-agent launch先保存原生operationId及outcome.kind/handle，再从完整清单取得精确handle的incarnation并保存pending candidate；任一回执都不等于bound。保存后经完整身份、存活、可写、空闲、auto 和输入核验，重锁检查同一意图及占用后才可bound。其他owner已保存handle但没有incarnation的launch outcome、以及精确pending candidate，同样占用目标；候选保存、恢复及最终绑定都要检查。structured聊天页与非auto终端保留pending，不改配置强制放行。
+仅对既有agent.launch.v2预约，agent launch先保存原生operationId及outcome.kind/handle，再从完整清单取得精确handle的incarnation并保存pending candidate；任一回执都不等于bound。保存后经完整身份、存活、可写、空闲、auto 和输入核验，重锁检查同一意图及占用后才可bound。其他owner已保存handle但没有incarnation的launch outcome、以及精确pending candidate，同样占用目标；候选保存、恢复及最终绑定都要检查。structured聊天页与非auto终端保留pending，不改配置强制放行。
 
 创建前status/list必须同runtime、执行端ready/reachable且具备正式版本≥1.4.229和所需launch能力。原生JSON错误从stdout固定结构投影；operationId不从散文、stderr token或本地creation_id推断。只有kind/started、有限returncode/timeout、已知code及最小启动身份能落入安全诊断，launchRequest/cause/recoveryCommand等不保存。
 
@@ -71,15 +85,19 @@ PY
 
 | 不变量/错误反例 | 已有确定性回归 |
 | --- | --- |
+| 新预约准确的每实例auto命令与零落盘预览；失败后不重创/重放 | AutoLaunchTests；test_explicit_create_cli_dispatch_and_confirmation_boundary；test_parallel_processes_create_and_submit_at_most_once |
+| 精确八提示仅限首次；显式draft、相似文本、非auto或身份漂移均阻断 | test_claude_2_1_303_static_placeholders_bind_new_create_once；test_typed_try_text_reported_as_native_draft_is_never_a_placeholder；test_placeholder_lookalikes_and_drifted_or_non_auto_candidates_stay_pending |
 | 预约同步失败零调用；未启动、丢回执、旧 creating 不重提 | test_explicit_reservation_sync_failure_prevents_native_create；test_explicit_failed_native_launch_is_not_resubmitted；test_explicit_lost_receipt_does_not_infer_owner_or_recreate；test_explicit_legacy_creating_blocks_every_mutating_entry_point |
 | 无效 intent/runtime/清单不能升级为证据；不完整 selector 零副作用 | test_explicit_candidate_requires_valid_saved_intent_identity；test_explicit_invalid_runtime_is_rejected_before_reservation；test_explicit_malformed_inventory_never_proves_prior_absence；test_explicit_incomplete_project_cli_is_rejected_before_any_side_effect |
 | 旧任务完整保留、历史禁止重放、同目标 rebind 不归零 | test_explicit_recovery_rejects_missing_or_inconsistent_previous_tasks；test_explicit_replacement_preserves_archived_task_identity_and_attempts；test_archived_task_cannot_replay_after_rebind；test_same_target_rebind_cannot_reset_task_history |
 | 精确 pending candidate 占用；并发和晚回执不能覆盖 | test_explicit_other_owner_pending_candidate_reserves_exact_target；test_other_owner_updates_survive_create_and_send_merge；test_late_receipt_does_not_overwrite_changed_intent；test_parallel_processes_create_and_submit_at_most_once |
-| 新协议先存handle再查incarnation；未有candidate也占用；structured不绑定 | test_launch_receipt_is_durable_before_inventory_and_incarnation_lookup；test_receipt_handle_without_candidate_already_reserves_other_owner_target；test_structured_outcome_stays_pending_without_terminal_verification_or_replay |
+| 既有agent协议先存handle再查incarnation；未有candidate也占用；structured不绑定 | test_launch_receipt_is_durable_before_inventory_and_incarnation_lookup；test_receipt_handle_without_candidate_already_reserves_other_owner_target；test_structured_outcome_stays_pending_without_terminal_verification_or_replay |
 | 同ID重放先持久计数、并发限一次；runtime/context/无ID不能绕过 | test_real_cli_replays_stdout_unknown_once_under_concurrent_callers；test_replay_reservation_fsync_failure_prevents_native_replay；test_replay_requires_saved_id_confirm_original_context_and_budget；test_legacy_no_id_pending_is_unchanged_after_upgrade_even_with_retry_flag |
 | stdout安全投影；错误ID/能力/版本不能新建或扩大权限 | test_stdout_native_error_contract_is_minimized_not_parsed_from_prose；test_mismatched_replay_receipt_cannot_replace_original_operation_id；test_status_inventory_runtime_mismatch_never_reserves_creation；test_launch_preflight_rejects_old_missing_capability_and_unready_before_reservation |
 | 预检与启动同一child-cwd executable；fixture不回退真实CLI；畸形null先结构化阻断 | test_relative_executable_is_pinned_from_child_cwd_before_every_native_call；test_fixture_environment_disables_unselected_native_cli；test_null_saved_outcome_is_blocked_as_json_before_other_owner_queries |
 | 原始字节、坏 hash/截断和 legacy 降级继续阻断 | test_non_lf_hunk_payload_checks_and_applies；test_cli_preserves_patch_newlines；test_bad_hash_count_truncation_and_damaged_candidate_block；test_legacy_is_opt_in_and_cannot_downgrade_corruption |
 | 外发预算、媒体 override 与证据型摘要 | test_prepare_frontloads_same_utf8_budget_as_render；test_media_override_is_only_an_extension_override；test_summary_explicit_evidence_is_short_and_not_a_verdict |
+| 无 receipt 的可见屏幕和标记不能受理、不能 finish、不能重发；调用带已保存 environment | test_visible_screen_marker_without_receipt_stays_unaccepted；test_started_failure_never_becomes_not_sent |
+| 精确启动提示只在无任务历史时放行，含 how does 提示 | test_how_does_filepath_startup_hint_is_allowed_only_without_task_history；test_native_empty_startup_hint_with_nbsp_is_not_a_user_draft；test_fix_typecheck_startup_hint_is_allowed_only_without_task_history |
 
-状态分层还有机械边界：上面的校验能证明文件一致，但不能证明原生窗口已消费规则、远端已发布或真实任务通过。这些跨进程/外部事实必须另取实际证据；没有通道时保持未验证。对应反例和审查场景见[学习卡](../learning-candidates/2026-10-19-local-closeout.md)。
+状态分层还有机械边界：上面的校验能证明文件一致，但不能证明原生窗口已消费规则、远端已发布或真实任务通过。这些跨进程/外部事实必须另取实际证据；没有通道时保持未验证。对应反例和审查场景见[学习卡](../learning-candidates/2026-10-19-local-closeout.md)。宿主能力列表与客户端提交能力、以及可见屏幕冒充受理的对抗场景见[可见回复学习卡](../learning-candidates/2026-10-19-recovery-visible-reply.md)；该卡已由主控依据独立实现 Review 和确定性回归提升为项目内规则，真实云端事实仍单独取证。

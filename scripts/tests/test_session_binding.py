@@ -39,6 +39,7 @@ class RemoteOrca:
         self.offline = self.busy = self.lose_create = self.lose_send = False
         self.mode = 'auto mode on'
         self.draft = ''
+        self.native_draft = None  # Orca 1.4.229 typed-text (non-dim, before cursor) classification
         self.source = 'screen'
         self.runtime = 'runtime-one'
         self.prompt_space = ' '
@@ -70,6 +71,16 @@ class RemoteOrca:
                 'capabilities': list(self.capabilities)}}
         elif action == 'list':
             envelope['result'] = {'terminals': copy.deepcopy(self.terminals), 'truncated': False}
+        elif action == 'create':
+            assert args[args.index('--command') + 1] == 'claude --permission-mode auto', args
+            self.creates += 1
+            terminal = {'handle': 'term_' + str(self.creates), 'incarnationId': 'inc_' + str(self.creates),
+                        'worktreeId': WORKTREE, 'agentIdentity': 'claude', 'connected': True,
+                        'writable': True, 'orphaned': False}
+            self.terminals.append(terminal)
+            if self.lose_create:
+                raise TimeoutError('response lost after create')
+            envelope['result'] = {'terminal': {'handle': terminal['handle'], 'worktreeId': WORKTREE}}
         elif action == 'launch':
             if '--retry-launch' in args:
                 self.replays += 1
@@ -90,10 +101,14 @@ class RemoteOrca:
             envelope['result'] = {'wait': {'satisfied': not self.busy}}
         elif action == 'read':
             screen = '--screen' in args
+            # Orca replaces a typed composer row with the bare glyph and reports it as `draft`.
+            row = '❯' if screen and self.native_draft else '❯' + self.prompt_space + self.draft
             envelope['result'] = {'terminal': {'handle': args[args.index('--terminal') + 1],
-                'tail': ['────────', '❯' + self.prompt_space + self.draft, '────────', '⏵⏵ ' + self.mode],
+                'tail': ['────────', row, '────────', '⏵⏵ ' + self.mode],
                 'source': self.source if screen else 'stream', 'truncated': False, 'limited': False,
                 'latestCursor': '41', 'nextCursor': '41', 'oldestCursor': '0'}}
+            if screen and self.native_draft:
+                envelope['result']['terminal']['draft'] = self.native_draft
         elif action == 'send':
             self.sends += 1
             if self.lose_send:
@@ -121,6 +136,10 @@ class BindingTests(unittest.TestCase):
         spec = importlib.util.spec_from_file_location('session_binding', TARGET)
         self.mod = importlib.util.module_from_spec(spec)
         spec.loader.exec_module(self.mod)
+        # Existing suite keeps covering saved agent.launch.v2 behavior; AutoLaunchTests cover the new path.
+        self.mod.NEW_CREATE_PROTOCOL = self.launch_protocol or 'agent.launch.v2'
+
+    launch_protocol = None
 
     def manager(self, owner=OWNER_A, project=None, env='Grok Bot', worktree=WORKTREE):
         return self.mod.BindingManager(self.state, owner, project or self.project, env, worktree, self.remote)
@@ -163,6 +182,10 @@ with (p/'native-cwds.jsonl').open('a') as f: f.write(json.dumps(os.getcwd())+'\\
 t={'handle':'term-cli','incarnationId':'inc-cli','worktreeId':'repo::/home/box/orca/projects/hello','agentIdentity':'claude','connected':True,'writable':True,'orphaned':False}
 if action=='status': r={'runtime':{'state':'ready','reachable':True,'runtimeId':'runtime-cli','appVersion':'1.4.229','capabilities':['agent.launch.v2','agent.launch.replay-required.v1','agent.launch.local-presentation.v1']}}
 elif action=='list': r={'terminals':[t] if (p/'created-cli').exists() else [],'truncated':False}
+elif action=='create':
+ assert args[args.index('--command')+1]=='claude --permission-mode auto'
+ with (p/'created-cli').open('a') as f: f.write('create\\n')
+ r={'terminal':{'handle':t['handle'],'worktreeId':t['worktreeId']}}
 elif action=='launch':
  if '--retry-launch' not in args:
   with (p/'created-cli').open('a') as f: f.write('create\\n')
@@ -199,7 +222,7 @@ print(json.dumps({'ok':True,'result':r,'_meta':{'runtimeId':'runtime-cli'}}))
                 self.assertEqual(result.returncode, 0, result.stderr)
                 self.assertFalse((caller / 'native-calls.jsonl').exists(), 'Must not change executable after preflight')
                 calls = [json.loads(line) for line in (self.project / 'native-calls.jsonl').read_text().splitlines()]
-                self.assertEqual(sum(a[:2] == ['agent', 'launch'] for a in calls), 1)
+                self.assertEqual(sum(a[:2] in (['agent', 'launch'], ['terminal', 'create']) for a in calls), 1)
                 self.assertEqual(self.saved()['creation_launch']['context'], {
                     'cwd': str(self.project), 'executable': str(self.project / 'orca')})
                 self.assertTrue(all(json.loads(cwd) == str(self.project)
@@ -400,7 +423,12 @@ print(json.dumps({'ok':True,'result':r,'_meta':{'runtimeId':'runtime-cli'}}))
         command = [sys.executable, '-B', str(TARGET), 'create', '--controller', 'codex',
                    '--project-root', str(self.project), '--project', WORKTREE, '--confirm',
                    '--state-dir', str(self.state), '--orca', str(executable)]
-        first = subprocess.run(command, capture_output=True, text=True, env=env, timeout=15)
+        # A pre-upgrade agent.launch.v2 reservation; new reservations use the auto terminal path.
+        legacy = [sys.executable, '-B', '-c', 'import runpy,sys;sys.argv=sys.argv[1:];'
+                  'm=runpy.run_path(sys.argv[0]);m["NEW_CREATE_PROTOCOL"]="agent.launch.v2";'
+                  'g=m["main"].__globals__;g["NEW_CREATE_PROTOCOL"]="agent.launch.v2";sys.exit(m["main"]())',
+                  str(TARGET), *command[3:]]
+        first = subprocess.run(legacy, capture_output=True, text=True, env=env, timeout=15)
         self.assertEqual(first.returncode, 1, first.stdout)
         blocked = json.loads(first.stderr)
         self.assertEqual(blocked['launch']['operationId'], OPERATION_ID)
@@ -579,7 +607,8 @@ print(json.dumps({'ok':True,'result':r,'_meta':{'runtimeId':'runtime-cli'}}))
         self.assertEqual(json.loads(duplicate.stderr)['category'], 'has_live_binding')
         self.assertEqual((self.root / 'created-cli').read_text(), 'create\n')
         calls = [json.loads(line) for line in (self.root / 'native-calls.jsonl').read_text().splitlines()]
-        self.assertEqual(sum(args[1] == 'launch' for args in calls), 1)
+        self.assertEqual(sum(args[1] in ('launch', 'create') for args in calls), 1)
+        self.assertFalse(any(args[:2] == ['agent', 'launch'] for args in calls))
 
     def test_explicit_reservation_sync_failure_prevents_native_create(self):
         original = self.mod.os.fsync
@@ -1021,6 +1050,87 @@ print(json.dumps({'ok':True,'result':r,'_meta':{'runtimeId':'runtime-cli'}}))
         self.assertEqual(self.remote.creates, 1)
         self.assertEqual(self.remote.sends, 1)
 
+    NATIVE_STATIC_HINTS = ('Try "create a util logging.py that..."', 'Try "fix lint errors"',
+                           'Try "how do I log an error?"')
+
+    def test_claude_2_1_303_static_placeholders_bind_new_create_once(self):
+        for hint in self.NATIVE_STATIC_HINTS:
+            with self.subTest(hint=hint):
+                self.state = self.root / ('state-' + str(abs(hash(hint))))
+                self.remote = RemoteOrca(); self.remote.prompt_space = '\u00a0'; self.remote.draft = hint
+                bound = self.explicit_create()
+                self.assertEqual(bound['action'], 'bound')
+                self.assertEqual(self.remote.creates, 1)
+                self.assertEqual(self.manager().send('task-one', 'main', 'code task')['action'], 'sent')
+                self.remote.draft = ''; self.manager().finish('task-one'); self.remote.draft = hint
+                with self.assertRaises(ValueError): self.manager().send('task-two', 'main', 'more')
+                self.assertEqual(self.remote.sends, 1)
+
+    def test_typed_try_text_reported_as_native_draft_is_never_a_placeholder(self):
+        self.remote.native_draft = 'Try "create a util logging.py that..."'
+        with self.assertRaises(self.mod.Blocked) as caught: self.explicit_create()
+        self.assertEqual(caught.exception.category, 'create_unverified')
+        self.assertEqual(self.saved()['state'], 'creating')
+        with self.assertRaises(self.mod.Blocked): self.explicit_create()
+        self.assertEqual(self.remote.creates, 1)
+        self.remote.native_draft = None
+        self.explicit_create()
+        self.remote.native_draft = 'Try "fix lint errors"'
+        with self.assertRaises(ValueError): self.manager().send('task-one', 'main', 'code task')
+        self.assertEqual(self.remote.sends, 0)
+
+    def test_placeholder_lookalikes_and_drifted_or_non_auto_candidates_stay_pending(self):
+        for draft in ('Try "create a util logging.py that... now"', 'Try "fix lint errors" && rm -rf .',
+                      'Try "how do I log an error?" please', 'Try anything', 'Try "create a util logging.py"'):
+            with self.subTest(draft=draft):
+                self.state = self.root / ('look-' + str(abs(hash(draft))))
+                self.remote = RemoteOrca(); self.remote.draft = draft
+                with self.assertRaises(self.mod.Blocked) as caught: self.explicit_create()
+                self.assertEqual(caught.exception.category, 'create_unverified')
+                self.assertEqual(self.saved()['state'], 'creating')
+        for attr, value in (('mode', 'bypass permissions on'), ('mode', 'accept edits on'), ('mode', '')):
+            with self.subTest(mode=value):
+                self.state = self.root / ('mode-' + str(abs(hash(value))))
+                self.remote = RemoteOrca(); self.remote.draft = self.NATIVE_STATIC_HINTS[0]
+                setattr(self.remote, attr, value)
+                with self.assertRaises(self.mod.Blocked) as caught: self.explicit_create()
+                self.assertEqual(caught.exception.category, 'create_unverified')
+                with self.assertRaises(self.mod.Blocked): self.explicit_create()
+                self.assertEqual(self.saved()['state'], 'creating')
+                self.assertEqual(self.remote.creates, 1)  # never relaunch to obtain auto mode
+                self.assertEqual(self.remote.sends, 0)    # never type a mode toggle
+        self.state = self.root / 'drift'; self.remote = RemoteOrca()
+        self.remote.draft = self.NATIVE_STATIC_HINTS[0]
+        self.remote.busy = True
+        with self.assertRaises(self.mod.Blocked): self.explicit_create()
+        self.assertEqual(self.saved()['creation_candidate']['incarnation'], 'inc_1')
+        self.remote.busy = False
+        self.remote.terminals[0]['incarnationId'] = 'inc_other'  # identity drift after candidate
+        with self.assertRaises(self.mod.Blocked): self.explicit_create()
+        self.assertEqual(self.saved()['state'], 'creating')
+        self.assertEqual(self.remote.creates, 1)
+        self.assertEqual(self.remote.sends, 0)
+
+    def test_lost_or_timed_out_launch_with_placeholder_recovers_without_relaunch(self):
+        self.remote.draft = self.NATIVE_STATIC_HINTS[0]
+        for failure in ('lost', 'timeout'):
+            with self.subTest(failure=failure):
+                self.state = self.root / ('rec-' + failure)
+                self.remote = RemoteOrca(); self.remote.draft = self.NATIVE_STATIC_HINTS[0]
+                if failure == 'lost':
+                    self.remote.lose_create = True
+                else:
+                    def slow(args):
+                        if args[1] == 'launch': raise subprocess.TimeoutExpired('orca', 180)
+                    self.remote.hook = slow
+                with self.assertRaises(self.mod.Blocked) as caught: self.explicit_create()
+                self.assertEqual(caught.exception.category, 'create_unverified')
+                self.remote.lose_create = False; self.remote.hook = None
+                for _ in range(2):
+                    with self.assertRaises(self.mod.Blocked): self.explicit_create()
+                self.assertEqual(self.saved()['state'], 'creating')
+                self.assertEqual(sum(a[1] == 'launch' for a, _ in self.remote.calls), 1)
+
     def test_first_send_does_not_allow_arbitrary_try_text_or_real_drafts(self):
         m = self.manager(); m.create(confirm=True)
         for draft in ('my actual unsent draft', 'Try "delete all files"',
@@ -1086,6 +1196,10 @@ args=sys.argv[1:]; action=args[1] if args[0]!='status' else 'status'
 t={'handle':'term-process','incarnationId':'inc-process','worktreeId':'repo::/home/box/orca/projects/hello','agentIdentity':'claude','connected':True,'writable':True,'orphaned':False}
 if action=='status': r={'runtime':{'state':'ready','reachable':True,'runtimeId':'runtime-process','appVersion':'1.4.229','capabilities':['agent.launch.v2','agent.launch.replay-required.v1','agent.launch.local-presentation.v1']}}
 elif action=='list': r={'terminals':[t] if (p/'created').exists() else [],'truncated':False}
+elif action=='create':
+ assert args[args.index('--command')+1]=='claude --permission-mode auto'
+ with (p/'created').open('a') as f: f.write('create\\n')
+ time.sleep(.25); r={'terminal':{'handle':t['handle'],'worktreeId':t['worktreeId']}}
 elif action=='launch':
  with (p/'created').open('a') as f: f.write('create\\n')
  time.sleep(.25); r={'operationId':'1792370000000-00000000000000000000000000000001','outcome':{'kind':'terminal','handle':t['handle']},'worktreeId':t['worktreeId'],'receipt':{'mode':'terminal'}}
@@ -1600,6 +1714,134 @@ print(json.dumps({'ok':True,'result':r,'_meta':{'runtimeId':'runtime-process'}})
         with self.assertRaises(self.mod.Blocked): self.manager().create(confirm=True)
         self.assertEqual(self.saved()['state'], 'creating')
         self.assertNotIn('handle', self.saved())
+
+
+
+    def test_how_does_filepath_startup_hint_is_allowed_only_without_task_history(self):
+        m = self.manager(); m.create(confirm=True)
+        self.remote.prompt_space = '\u00a0'
+        self.remote.draft = 'Try "how does <filepath> work?"'
+        try:
+            result = m.send('task-one', 'main', 'actual code task')
+        except ValueError as exc:
+            result = {'action': 'blocked', 'reason': str(exc)}
+        self.assertEqual(result['action'], 'sent')
+        self.assertEqual(self.remote.sends, 1)
+        with self.assertRaises(ValueError):
+            m.send('task-one', 'export-1', 'export final patch')
+
+    def test_visible_screen_marker_without_receipt_stays_unaccepted(self):
+        m = self.manager(); m.create(confirm=True)
+        def fail(args):
+            if args[1] == 'send':
+                raise self.failure('nonzero', started=True, returncode=1)
+        self.remote.hook = fail
+        with self.assertRaises(self.mod.Blocked):
+            m.send('task-one', 'main', 'text')
+        def read(args):
+            if args[1] != 'read':
+                return None
+            screen = '--screen' in args
+            terminal = {'handle': args[args.index('--terminal') + 1],
+                        'truncated': False, 'limited': False,
+                        'source': 'screen' if screen else 'stream'}
+            if screen:
+                terminal['tail'] = ['● visible answer', 'VISIBLE_ONLY_MARKER',
+                                    '────────', '❯' + self.remote.prompt_space, '────────',
+                                    '⏵⏵ auto mode on']
+            else:
+                terminal.update(tail=[], latestCursor='1', nextCursor='1', oldestCursor='0')
+            return {'ok': True, '_meta': {'runtimeId': self.remote.runtime},
+                    'result': {'terminal': terminal}}
+        self.remote.hook = read
+        result = m.reconcile('task-one', 'main')
+        message = result['messages']['main']
+        self.assertEqual(message['state'], 'sending')
+        self.assertNotIn('receipt', message)
+        self.assertFalse(message['evidence']['complete'])
+        self.assertEqual(message['evidence']['reason'], 'incomplete_stream')
+        with self.assertRaises(self.mod.Blocked) as caught:
+            m.finish('task-one')
+        self.assertEqual(caught.exception.category, 'uncertain_send')
+        self.assertEqual(m.send('task-one', 'main', 'text')['action'], 'resume')
+        self.assertEqual(sum(args[1] == 'send' for args, _ in self.remote.calls), 1)
+        self.assertTrue(all('--environment' in args and args[args.index('--environment') + 1] == 'Grok Bot'
+                            for args, _ in self.remote.calls))
+        saved = (self.state / 'bindings.json').read_text()
+        self.assertNotIn('VISIBLE_ONLY_MARKER', saved)
+        self.assertNotIn('VISIBLE_ONLY_MARKER', json.dumps(result))
+
+
+class AutoLaunchTests(unittest.TestCase):
+    """Per-instance auto creation; saved agent reservations keep their protocol."""
+    launch_protocol = 'terminal.create.claude-auto.v1'
+    setUp = BindingTests.setUp
+    manager = BindingTests.manager
+    explicit_create = BindingTests.explicit_create
+    saved = BindingTests.saved
+    failure = BindingTests.failure
+
+    def test_auto_preview_reports_exact_command_without_creating_state(self):
+        result = self.explicit_create(confirm=False)
+        self.assertEqual(result['action'], 'dry_run')
+        self.assertEqual(result['plan'].get('command'), 'claude --permission-mode auto')
+        self.assertEqual(result['plan']['placement'], 'terminal in the explicit worktree')
+        self.assertFalse(self.state.exists())
+        self.assertEqual(self.remote.creates, 0)
+        self.assertEqual(self.remote.sends, 0)
+        self.assertFalse(any(a[:2] in (['terminal', 'create'], ['agent', 'launch'])
+                             for a, _ in self.remote.calls))
+
+    def test_auto_create_uses_exact_per_instance_command_and_binds_only_in_auto(self):
+        bound = self.explicit_create()
+        self.assertEqual(bound['action'], 'bound')
+        self.assertNotIn('operationId', bound)
+        command = next(a for a, _ in self.remote.calls if a[:2] == ['terminal', 'create'])
+        self.assertEqual(command[:6], ['terminal', 'create', '--worktree', 'id:' + WORKTREE,
+                                       '--command', 'claude --permission-mode auto'])
+        self.assertNotIn('--dangerously-skip-permissions', ' '.join(command))
+        self.assertFalse(any(a[:2] == ['agent', 'launch'] for a, _ in self.remote.calls))
+        self.assertEqual(self.remote.creates, 1)
+
+    def test_auto_create_in_bypass_or_unknown_mode_never_binds_or_relaunches(self):
+        for mode in ('bypass permissions on', 'auto mode on · bypass', '', 'accept edits on'):
+            with self.subTest(mode=mode):
+                self.state = self.root / ('auto-' + str(abs(hash(mode))))
+                self.remote = RemoteOrca(); self.remote.mode = mode
+                with self.assertRaises(self.mod.Blocked) as caught: self.explicit_create()
+                self.assertEqual(caught.exception.category, 'create_unverified')
+                with self.assertRaises(self.mod.Blocked): self.explicit_create()
+                self.assertEqual(self.saved()['state'], 'creating')
+                self.assertEqual(self.remote.creates, 1)
+                self.assertEqual(self.remote.sends, 0)
+
+    def test_auto_create_failure_timeout_or_bad_reply_is_never_replayed(self):
+        cases = {'lost': None, 'timeout': subprocess.TimeoutExpired('orca', 180),
+                 'not_started': 'launch', 'bad': 'bad'}
+        for name, failure in cases.items():
+            with self.subTest(case=name):
+                self.state = self.root / ('autofail-' + name); self.remote = RemoteOrca()
+                if name == 'lost':
+                    self.remote.lose_create = True
+                else:
+                    def hook(args, failure=failure):
+                        if args[:2] != ['terminal', 'create']: return None
+                        if failure == 'bad':
+                            return {'ok': True, '_meta': {'runtimeId': 'runtime-one'}, 'result': {'terminal': {'handle': {'x': 1}}}}
+                        if failure == 'launch': raise self.failure('launch', started=False)
+                        raise failure
+                    self.remote.hook = hook
+                with self.assertRaises(self.mod.Blocked): self.explicit_create()
+                self.remote.hook = None; self.remote.lose_create = False
+                for _ in range(2):
+                    with self.assertRaises(self.mod.Blocked): self.explicit_create()
+                row = self.saved()
+                self.assertEqual(row['state'], 'creating')
+                self.assertNotIn('operationId', row['creation_launch'])
+                with self.assertRaises(self.mod.Blocked):
+                    self.manager().create(confirm=True, retry_launch=OPERATION_ID)
+                self.assertEqual(sum(a[:2] == ['terminal', 'create'] for a, _ in self.remote.calls), 1)
+                self.assertFalse(any(a[:2] == ['agent', 'launch'] for a, _ in self.remote.calls))
 
 
 if __name__ == '__main__':

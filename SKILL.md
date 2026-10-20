@@ -53,9 +53,9 @@ python3 <skill-dir>/scripts/session_binding.py create <同一组会话与目标�
 
 `--project`是云端完整worktree ID，`--project-root`仍是Mac根目录；若同时传worktree，两者必须相同。dry-run不创建终端、状态目录、lock或intent。用户已明确批准该目标的新建后，才可对同一命令增加`--confirm`；既有bound的换绑则按reference的rebind门禁执行，无绑定不认领legacy终端。暂时不可达先等一至两分钟核查原操作，不据此新建。
 
-确认后先持久保存reservation，再一次`agent launch --agent claude`，不带prompt、模型或设置参数；执行端须报告Orca≥1.4.229及所需能力。Orca设置决定聊天或终端；聊天页保持pending，不改设置强制转终端。先保存原生operationId和精确handle，再由完整清单取得incarnation，经Claude身份、auto、空输入及空闲核验后才绑定。
+确认后先持久保存reservation，新预约只调用一次`terminal create --worktree id:<完整ID> --command "claude --permission-mode auto"`，权限参数仅作用于该新实例；不传裸`claude`、prompt或模型参数，不改全局agentDefaultArgs。执行端仍须报告Orca≥1.4.229及既有能力。先保存精确handle，再由完整清单取得incarnation，经Claude身份、auto且无bypass、空输入及空闲核验后才绑定。已有绑定不改动。
 
-未知结果保留creating；重复confirm只继续核验已保存的精确回执，不自动启动或重放。仅新协议保存了有效原生operationId及明确retrySafe证据时，才可按[显式启动重放](references/session-binding.md#显式启动重放)在原目标、runtime、可执行文件和目录，显式重放同ID一次。无ID的旧pending保持未知；不能借升级、空清单、随机ID或新state-dir恢复创建机会。启动重放与发送`--retry-request`是两个不同协议。
+未知结果保留creating；重复confirm只核验已保存的精确结果，不自动启动或重放。新`terminal.create.claude-auto.v1`没有原生operationId/replay，丢失结果继续pending。既有`agent.launch.v2`预约保留原协议；只有它已保存有效原生operationId及明确retrySafe证据时，才可按[显式启动重放](references/session-binding.md#显式启动重放)在原目标、runtime、可执行文件和目录，显式重放同ID一次。无ID的旧pending保持未知；不能借升级、空清单、随机ID或新state-dir恢复创建机会。启动重放与发送`--retry-request`是两个不同协议。
 
 所有wait/read只针对返回的handle/runtime/incarnation；发送前保存cursor和intent，receipt仅保留白名单字段。保留真实草稿、未知屏幕、非auto、身份漂移、creating/sending未知结果；不清空输入、不自动换绑、开窗、重启网络或删registry。
 

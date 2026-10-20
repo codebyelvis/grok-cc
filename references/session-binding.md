@@ -31,13 +31,13 @@ python3 <skill-dir>/scripts/session_binding.py create <相同会话与目标参�
 
 只有用户明确选择该目标的新建后，才可执行同一命令加`--confirm`。确认时重新核对当前事实：无active任务、无未解决消息和creating；已有live绑定返回has_live_binding。替代创建须在相同runtime完整清单中证明原实例确已消失；列表缺页、缺失/重复handle、身份漂移、临时断连、busy或非auto都不能证明消失。不可达先等一至两分钟再核查原操作。
 
-执行端status须报告相同runtime、ready/reachable、正式版本≥1.4.229，以及`agent.launch.v2`、`agent.launch.replay-required.v1`、`agent.launch.local-presentation.v1`三项能力。缺失、旧版本、预发行版或status/list身份不一致时不预约、不启动，不回退terminal create。
+执行端status须报告相同runtime、ready/reachable、正式版本≥1.4.229，以及既有`agent.launch.v2`、`agent.launch.replay-required.v1`、`agent.launch.local-presentation.v1`三项能力。保留此保守预检；缺失、旧版本、预发行版或status/list身份不一致时不预约、不启动，不在两种协议间自动回退。
 
-helper在锁内重读/比对后，以fsync/replace/目录fsync持久保存稳定creation_id、state=creating与creation_launch上下文，再锁外调用一次公开`agent launch --agent claude --worktree id:<完整ID>`。不传prompt/model/effort/permission参数，不改配置。原生进程使用已保存的可执行文件实际路径和规范化Mac项目目录；启动外层timeout为180秒，容纳CLI内的查询与启动阶段。保存失败零启动调用；没有自动变异重试。不保证跨客户端/registry或exactly-once，不得删除、切换state目录或换身份逃避pending。
+helper在锁内重读/比对后，以fsync/replace/目录fsync持久保存稳定creation_id、state=creating与creation_launch上下文。新预约记录`terminal.create.claude-auto.v1`，锁外只调用一次公开`terminal create --worktree id:<完整ID> --command "claude --permission-mode auto"`。绝不传裸`claude`，否则Orca可能用全局agentDefaultArgs改写；仅新实例获得auto，不改全局配置、模型、账号或现有终端。原生进程使用已保存的可执行文件实际路径和规范化Mac项目目录；terminal create沿用有限30秒外层预算，既有agent launch为180秒。保存失败零调用；没有自动变异重试。不保证跨客户端/registry或exactly-once，不得删除、切换state目录或换身份逃避pending。
 
-原生回执先在creation_launch保存最小operationId和outcome.kind/handle，绝不保存receipt.detail、prompt或原始响应。Orca按既有设置选择structured聊天页或terminal；structured返回unsupported_contract并保持pending，不对它调用terminal send，也不强制改为终端。终端回执不含incarnation；仅从同runtime完整清单中精确handle对应的Claude取得incarnation，再保存creation_candidate。已保存handle但尚无candidate时同样占用目标，其他owner不能认领。
+新路径只从同runtime的`result.terminal.handle`保存最小terminal outcome，不保存operationId/retrySafe、prompt或原始响应；该原生路径没有replay账本，未启动、失败、超时、丢回执或身份不可核实时保留creating，不再创建。已有`agent.launch.v2`预约不迁移，继续按旧协议保存最小operationId和outcome.kind/handle；structured返回unsupported_contract并保持pending，不对它调用terminal send。两种路径均仅从同runtime完整清单中精确handle对应的Claude取得incarnation，再保存creation_candidate。已保存handle但尚无candidate时同样占用目标，其他owner不能认领。
 
-候选仍须核对connected/writable/non-orphaned、idle、auto和空输入/精确首次提示，成功后重锁比对并绑定。非auto或真实草稿保留pending，不为通过检查修改权限/输入。旧绑定及任务归档，历史task身份与累计提交额度继续有效。回执不是绑定成功证据。
+候选仍须核对connected/writable/non-orphaned、idle、auto和空输入/精确首次提示，成功后重锁比对并绑定。非auto或真实草稿保留pending，不为通过检查修改权限/输入。精确首次提示仅为Claude Code 2.1.303原生空输入占位集合（含`create a util logging.py that...`等），且Orca screen读未报告draft；helper拒绝已报告的draft，其余依赖屏幕精确匹配启发式，不构成原生空输入证明。光标隐藏且真实输入与提示逐字相同时仍可能误判；该限制在原有5条提示中也存在。任何集合外Try文本仍拒绝。Orca 1.4.229 `agent launch`无每实例权限参数，Claude参数来自Orca全局设置agentDefaultArgs（缺省claude为`--dangerously-skip-permissions`，即bypass）；helper不改全局设置、不按键切换，bypass候选保持pending。旧绑定及任务归档，历史task身份与累计提交额度继续有效。回执不是绑定成功证据。
 
 恢复前须核对creation_previous的任务及active状态与reservation保留内容一致；带旧任务却缺少快照、任务缩水或状态不一致均保留原文件并阻断。其他owner已经持久保存的精确candidate也占用该目标，在接收候选、恢复核验及最终绑定时都不能认领。
 
@@ -45,7 +45,7 @@ helper在锁内重读/比对后，以fsync/replace/目录fsync持久保存稳定
 
 ## 显式启动重放
 
-仅当helper从本次原生stdout JSON错误取得`agent_session_operation_unknown`，且其data明确包含`launchOutcome=unknown`、布尔`retrySafe=true`及合法operationId时，才持久保存重放依据。ID必须来自这一固定结构，不从错误散文、stderr token、recoveryCommand或任意嵌套字段提取，不在本地生成。creation_id是本地预约ID，不能用作原生operationId。
+仅适用于既有`agent.launch.v2`预约。只有helper从该协议原生stdout JSON错误取得`agent_session_operation_unknown`，且其data明确包含`launchOutcome=unknown`、布尔`retrySafe=true`及合法operationId时，才持久保存重放依据。新terminal-create协议不能取得此权限。ID必须来自这一固定结构，不从错误散文、stderr token、recoveryCommand或任意嵌套字段提取，不在本地生成。creation_id是本地预约ID，不能用作原生operationId。
 
 用户明确选择对这一次未知启动重放后，使用同一组create参数：
 

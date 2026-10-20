@@ -2,6 +2,13 @@
 
 作者：elvis。
 
+## 0.1.0.dev5 — 2026-10-20
+
+- 新预约用公开terminal create及完整命令`claude --permission-mode auto`，仅对新实例设置auto；不改Orca全局agentDefaultArgs或已有终端。
+- 新terminal.create.claude-auto.v1无原生operationId/replay；reservation与精确handle先落盘，失败/丢失/不可核实结果保留pending，不重复创建。既有agent.launch.v2及legacy记录保留原有恢复边界，不迁移状态。
+- 保留八个精确首次启动占位提示和显式draft拒绝，说明屏幕匹配的启发式限制；补充新路径、旧协议、可见标记不能代替受理及准确零落盘预览回归。
+- 源码发布、本地安装和真实云端验收分别记录；本次不创建CC、不发送消息，也不处理既有pending。真实新实例验证须另行确认。
+
 ## 0.1.0.dev4 — 2026-10-19，源码候选
 
 - 显式create改用Orca1.4.229公开agent launch，不带prompt或模型/设置变更；执行端版本、能力与runtime先核对。原生operationId及精确handle先落盘，再取得incarnation并执行原有Claude/auto/空闲/输入核验；structured聊天页保留pending。

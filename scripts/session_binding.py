@@ -42,6 +42,19 @@ NATIVE_CODES = TRANSIENT_READ_CODES | frozenset(('agent_session_operation_unknow
     'agent_session_operation_expired', 'incompatible_runtime', 'invalid_argument',
     'runtime_error', 'runtime_access_denied', 'agent_launch_tab_closed'))
 NATIVE_KINDS = frozenset(('launch', 'timeout', 'nonzero', 'invalid_json', 'invalid_envelope', 'invalid_result'))
+# Claude Code 2.1.303 bundle, empty-input placeholder list with no example files:
+# ["fix lint errors","fix typecheck errors","how does <f> work?","refactor <f>",
+#  "how do I log an error?","edit <f> to...","write a test for <f>","create a util logging.py that..."]
+CLAUDE_EMPTY_PLACEHOLDERS = frozenset('Try "' + hint + '"' for hint in (
+    'fix lint errors', 'fix typecheck errors', 'how does <filepath> work?', 'refactor <filepath>',
+    'how do I log an error?', 'edit <filepath> to...', 'write a test for <filepath>',
+    'create a util logging.py that...'))
+# Orca `agent launch` applies global agentDefaultArgs.claude
+# (--dangerously-skip-permissions). This per-instance path uses the public
+# `terminal create --command`; never bare `claude`, which Orca rewrites to its agent default.
+AUTO_LAUNCH_PROTOCOL = 'terminal.create.claude-auto.v1'
+AUTO_LAUNCH_COMMAND = 'claude --permission-mode auto'
+NEW_CREATE_PROTOCOL = AUTO_LAUNCH_PROTOCOL  # new reservations only; saved agent.launch.v2 rows keep their protocol
 LAUNCH_CAPABILITIES = frozenset(('agent.launch.v2', 'agent.launch.replay-required.v1',
                                 'agent.launch.local-presentation.v1'))
 
@@ -98,7 +111,8 @@ def _launch_record(row):
     allowed = required | {'operationId', 'retrySafe', 'outcome', 'diagnostic'}
     context = launch.get('context') if isinstance(launch, dict) else None
     valid = (isinstance(launch, dict) and required <= set(launch) <= allowed
-        and launch['protocol'] == 'agent.launch.v2'
+        and launch['protocol'] in ('agent.launch.v2', AUTO_LAUNCH_PROTOCOL)
+        and (launch['protocol'] == 'agent.launch.v2' or not ({'operationId', 'retrySafe'} & set(launch)))
         and type(launch['replay_attempts']) is int and launch['replay_attempts'] in (0, 1)
         and isinstance(context, dict) and set(context) == {'executable', 'cwd'}
         and context.get('cwd') == row.get('project')
@@ -117,7 +131,8 @@ def _launch_record(row):
         raise Blocked('integrity_failure', 'Invalid saved replay evidence; preserve registry')
     if 'outcome' in launch and (not isinstance(outcome, dict) or set(outcome) != {'kind', 'handle'}
             or outcome.get('kind') not in ('terminal', 'structured') or not _safe_identity(outcome.get('handle'))
-            or 'operationId' not in launch):
+            or ('operationId' not in launch) != (launch['protocol'] == AUTO_LAUNCH_PROTOCOL)
+            or (launch['protocol'] == AUTO_LAUNCH_PROTOCOL and outcome.get('kind') != 'terminal')):
         raise Blocked('integrity_failure', 'Invalid saved launch outcome; preserve registry')
     diagnostic = launch.get('diagnostic')
     if 'diagnostic' in launch:
@@ -608,6 +623,8 @@ class BindingManager:
         return Blocked(category, detail, diagnostic=copy.deepcopy(launch.get('diagnostic')), launch=view)
 
     def _launch_call(self, intent, retry_launch=None):
+        if intent['creation_launch']['protocol'] == AUTO_LAUNCH_PROTOCOL:
+            return self._auto_launch_call(intent)
         command = ['agent', 'launch', '--agent', 'claude', '--worktree', 'id:' + self.worktree]
         if retry_launch is not None:
             command.extend(['--retry-launch', retry_launch])
@@ -639,6 +656,28 @@ class BindingManager:
             launch.update(operationId=operation, outcome={k: outcome[k] for k in ('kind', 'handle')})
             launch.pop('retrySafe', None)
             # The known handle survives any subsequent inventory/read failure, even before incarnation is known.
+            db.save()
+            return copy.deepcopy(row)
+
+    def _auto_launch_call(self, intent):
+        command = ['terminal', 'create', '--worktree', 'id:' + self.worktree, '--command', AUTO_LAUNCH_COMMAND]
+        try:
+            result = self._call(command)
+        except (ValueError, OSError, subprocess.TimeoutExpired) as exc:
+            with Registry(self.state) as db:
+                row = self._creation_unchanged(db, intent)
+                row['creation_launch']['diagnostic'] = _diagnostic(exc)
+                db.save()
+                pending = copy.deepcopy(row)
+            # terminal create has no native replay ledger: unknown stays pending forever.
+            raise self._creation_blocked(pending, 'Launch outcome unavailable; retain intent, never start a fresh launch') from None
+        terminal = result['result'].get('terminal')
+        handle = terminal.get('handle') if isinstance(terminal, dict) else None
+        if result['_meta']['runtimeId'] != intent['runtime'] or not _safe_identity(handle):
+            raise self._creation_blocked(intent, 'Launch identity unverifiable; retain intent and do not recreate')
+        with Registry(self.state) as db:
+            row = self._creation_unchanged(db, intent)
+            row['creation_launch']['outcome'] = {'kind': 'terminal', 'handle': handle}
             db.save()
             return copy.deepcopy(row)
 
@@ -710,7 +749,7 @@ class BindingManager:
             row.update(**candidate, state='bound', tasks={}, active_task=None)
             db.save()
             result = {**self._view(row), 'action': 'bound', 'creation_id': row['creation_id']}
-            if 'creation_launch' in row:
+            if 'operationId' in row.get('creation_launch', {}):
                 result['operationId'] = row['creation_launch']['operationId']
             return result
 
@@ -763,13 +802,14 @@ class BindingManager:
                         item[key] = terminal[key]
                 inventory.append(item)
             return {'action': 'dry_run', 'plan': {'project': self.worktree, 'agent': 'claude',
-                    'required_mode': 'auto', 'placement': 'native agent surface in the explicit worktree'},
+                    'required_mode': 'auto', 'placement': 'terminal in the explicit worktree',
+                    'command': AUTO_LAUNCH_COMMAND},
                     'inventory': inventory, 'inventory_count': len(matching),
                     'inventory_limited': len(matching) > 20}
         row = {'owner': self.owner, 'project': self.project, 'environment': self.environment,
                'worktree': self.worktree, 'runtime': runtime, 'state': 'creating',
                'creation_id': str(uuid.uuid4()), 'tasks': {}, 'active_task': None}
-        row['creation_launch'] = {'protocol': 'agent.launch.v2', 'context': context,
+        row['creation_launch'] = {'protocol': NEW_CREATE_PROTOCOL, 'context': context,
                                   'replay_attempts': 0}
         _launch_record(row)
         if snapshot is not None:
@@ -824,8 +864,10 @@ class BindingManager:
         content = composer[1:].lstrip()
         allowed = {''}
         if allow_hint and not row['tasks']:
-            allowed.update(('Try "edit <filepath> to..."', 'Try "fix typecheck errors"',
-                            'Try "refactor <filepath>"', 'Try "write a test for <filepath>"'))
+            # Reject any reported `draft` above; screen matching is only a heuristic.
+            # Hidden-cursor input identical to a hint may be ambiguous, not proven empty.
+            # Accept only this exact startup set, never arbitrary "Try" text.
+            allowed.update(CLAUDE_EMPTY_PLACEHOLDERS)
         if content not in allowed:
             raise ValueError('Bound CC has a nonempty or ambiguous draft; preserve it')
         cursor = stream_terminal.get('latestCursor')

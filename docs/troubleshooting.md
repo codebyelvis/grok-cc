@@ -4,11 +4,16 @@
 
 ## 启动提示与草稿
 
-当前 helper 已核实三种精确原生启动提示，仅在无任务历史时允许：
+当前 helper 已核实这些精确原生启动提示，仅在无任务历史时允许：
 
 - `Try "edit <filepath> to..."`
 - `Try "fix typecheck errors"`
 - `Try "refactor <filepath>"`
+- `Try "write a test for <filepath>"`
+- `Try "how does <filepath> work?"`
+- `Try "fix lint errors"`
+- `Try "how do I log an error?"`
+- `Try "create a util logging.py that..."`
 
 仍须通过原绑定身份、auto mode、空闲、真实 screen 和无显式 draft 检查。相似文本、真实输入或历史任务后的提示继续阻止派发，不要清空输入或改成匹配任意 `Try`。
 
@@ -20,7 +25,13 @@
 
 `ensure`无绑定时也不创建；先用`create --project <完整云端worktreeID>`只读展示目标和计划，用户明确选择该目标的新建后才可加`--confirm`。已有live绑定阻止新建；不可达先等一至两分钟核查原操作，只有相同runtime完整清单证明原实例消失、无active/unknown且用户确认后才可替代创建。
 
-创建先持久保存reservation，再按Orca≥1.4.229公开`agent launch`启动Claude，不传prompt或修改设置。原生回执先保存operationId与精确handle，再从完整清单取得incarnation；非auto或草稿不能通过，structured聊天页保留pending并返回unsupported_contract。版本、能力和status/list runtime不一致时不启动，不回退terminal create。
+新创建先持久保存reservation，再按Orca≥1.4.229公开`terminal create --command "claude --permission-mode auto"`启动Claude，只作用于该实例，不传裸claude或prompt、不改全局设置。新协议只保存精确handle，没有operationId/replay；失败或丢回执保持pending，不能再新建。已有agent.launch.v2预约保留原协议及原生ID重放门禁。两种路径均从完整清单取得incarnation；非auto或草稿不能通过，旧structured结果保持pending。版本、能力和status/list runtime不一致时不启动，不自动换协议。
+
+宿主 status 的能力列表不等于 Mac CLI 提交的 client capability。列表里已有 `agent.launch.v2`，仍可能在 operationId 出现前被拒绝。没有 operationId 时保持 unknown，不重放，不改记为无副作用，不再新建。查看能力时用完整列表；只看前几项会像是缺失。不在本仓库里改 Orca 安装包。
+
+不带已保存 `--environment` 的 status 或 read 可能命中另一个 runtime。已绑定 handle 出现 stale 时，先用同一 environment 再读，不新开终端。
+
+屏幕上的完整回答、结束标记、`tui-idle` 和空 stream 都不能把 `sending` 收成 accepted。没有保存 receipt 时不要重发。提问回显里可能先出现标记；可见正文从回答起到最后一处标记，这只是可见证据。
 
 未知回执保留create_unverified；重复confirm只继续已保存精确回执/candidate的只读核验，不猜终端归属。只有已保存原生unknown+retrySafe+合法operationId，且用户选择重放时，才按[显式启动重放](../references/session-binding.md#显式启动重放)在原host/cwd/executable附加同ID，限一次且先落盘计数。没有ID、legacy creating、过期/再次未知、runtime变化都不能重新启动或换ID。损坏intent/candidate或缺失/重复清单身份不能证明消失，不删除/切换state绕过。
 

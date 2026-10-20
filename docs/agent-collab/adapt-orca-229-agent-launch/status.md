@@ -2,6 +2,43 @@
 
 作者：elvis。
 
+## Current amendment checkpoint — 2026-10-20
+
+Gate 0: approved implementation/publication/activation of the user's exact plan
+(a), scoped amendment to this existing OpenSpec; strict evidence. Router plus
+systematic debugging, writing-plans, TDD, independent code Review and
+verification-before-completion. Existing master and scoped Git push/local
+activation are explicitly authorized. No real CC/registry/config mutations.
+Current controller/executor is Codex `mode-auto-controller`; independent reviewer
+assignments and exact execution/stop/rollback scope are in the current plan.
+
+Root: the fixed cloud diff passes SHA256, but its reference hunk assumes older
+placeholder wording. Dry-run made no installation change. Source baseline is
+d094ffe plus five related retained modifications and the recovery learning card;
+unrelated requirement drafts are excluded. Fresh source make check131 PASS.
+Installed prerequisite has eight exact placeholders/native-draft regressions;
+source integration must retain it plus the source-only safety tests.
+
+Independent FULL_PREFLIGHT attempt1 PASS (mode-auto-implementation), no findings.
+Observed RED: private combined suite138 had 6 failures and 3 missing-placeholder
+subtest errors; source AutoLaunchTests had 6 assertion failures across4 tests.
+Minimum prerequisite/auto integration and accurate preview now pass fresh
+make check139 (7.710s), payload dev5, strict OpenSpec and diff checks. The extra
+three over cloud136 are two preserved source safety tests and one preview test.
+No tests were removed. Old-agent tests retain their protocol; real subprocess
+fixtures exercise the production default. Independent implementation
+Review PASS: independent closed-PATH make check139 (7.474s), strict/diff clean;
+actual-helper probes confirm terminal outcome-before-inventory, handle occupancy,
+reported-draft refusal,16 injected native-ID/retrySafe variants safely blocked,
+legacy no-ID/context drift refusal and safe error projection. No actionable
+implementation finding. Controller accepts this bounded evidence and promotes
+the retained project learning card/invariant/test mapping. Next: fresh final
+source verification and distinct Review. Publication and active installation
+have not occurred.
+Real new-instance validation still requires the user's separate confirmation.
+
+Historical checkpoints below do not override this amendment.
+
 ## Current checkpoint
 
 Gate0 continues the approved OpenSpec candidate and the user's explicit local Git authorization with no new branch. Integration-readiness FULL_PREFLIGHT PASS by independent Codex `/root/orca229_final_review`, control-plane-high, governed-review-evidence only; finding_completeness=true, no actionable finding. Frozen plan SHA58a6d8a67bb2cefd7fe6560ba81d62920c91bb4c5757e8a3898b675d18cf2f81 and preflight-v2 SHA321018488a21156efdf9ae00ae2a9d014c8715452774e9ea1e1bf3d3bcfd4685 accepted by controller.

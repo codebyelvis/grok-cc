@@ -1,25 +1,39 @@
 ## ADDED Requirements
 
-### Requirement: Explicit native agent launch
+### Requirement: Explicit per-instance auto terminal creation
 
-Confirmed creation MUST use the verified Orca >=1.4.229 `agent launch --agent claude` route in the explicitly selected worktree and environment. It MUST send no prompt and change no settings, model, account, proxy or permission mode. Ensure and dry-run MUST remain non-creating. Required runtime support MUST be checked before reservation/submission.
+New confirmed reservations MUST use Orca >=1.4.229 public `terminal create --worktree id:<selected-worktree> --command "claude --permission-mode auto"` in the selected environment. The exact command MUST affect only that new instance; bare `claude`, global settings changes, mode-toggle input, prompts and model overrides are forbidden. Existing runtime/version/capability preflight MUST remain. Ensure and dry-run MUST remain non-creating; preview MUST describe the terminal and its exact command. Existing `agent.launch.v2` rows MUST retain their saved protocol without migration or rewriting.
 
 #### Scenario: Supported terminal result
 - **GIVEN** an explicitly approved target and supported matching runtime
-- **WHEN** one confirmed launch returns a terminal handle and native operationId
-- **THEN** the helper saves minimized receipt identity before querying that exact handle, and binds only after all existing Claude/auto/composer/ownership checks pass
+- **WHEN** one confirmed terminal creation returns a safe handle
+- **THEN** the helper saves only the terminal outcome under `terminal.create.claude-auto.v1`, with no operationId/retrySafe, before querying that exact handle, and binds only after existing runtime/incarnation/worktree/Claude/auto/composer/ownership checks pass
 
 #### Scenario: Chat or unsafe terminal result
 - **GIVEN** a structured-chat outcome, non-auto terminal, unknown draft or mismatched identity
 - **WHEN** post-launch verification runs
 - **THEN** the helper retains pending evidence, sends no input, changes no settings and creates no replacement
 
+#### Scenario: Lost, malformed or failed terminal-create result
+- **GIVEN** a new-protocol reservation whose create result fails, times out or cannot prove identity
+- **WHEN** create is confirmed again or retry-launch is supplied
+- **THEN** uncertainty stays durable, no operationId is invented, and neither another create nor agent launch/replay is submitted
+
+### Requirement: Exact startup placeholders preserve real drafts
+
+Only the eight exact Claude Code startup placeholders in the accepted prerequisite MAY count as an empty composer before task history. Any reported native draft, lookalike text, unknown screen, non-auto mode or changed identity MUST block binding/sending without clearing input or launching again. A screen match is a heuristic, not proof that typed text is absent.
+
+#### Scenario: Placeholder before and after task history
+- **GIVEN** an exact known placeholder with no reported draft and all identity/auto checks passing
+- **WHEN** initial binding and first sending are verified
+- **THEN** the placeholder is allowed, but the same text after task history and any explicitly reported native draft remain blocked
+
 ### Requirement: Explicit bounded replay under native identity
 
-Only a documented, validated native operationId saved for the same pending launch MAY authorize an explicitly requested `create --confirm --retry-launch` replay. The original runtime, owner, destination, executable and canonical cwd MUST match. The replay intent MUST be durable before the single replay; automatic retries, a fresh launch, prompt carry and operationId substitution are forbidden.
+Only a documented, validated native operationId saved for the same pending `agent.launch.v2` reservation MAY authorize an explicitly requested `create --confirm --retry-launch` replay. The original runtime, owner, destination, executable and canonical cwd MUST match. The replay intent MUST be durable before the single replay; automatic retries, a fresh launch, prompt carry and operationId substitution are forbidden. `terminal.create.claude-auto.v1` grants no replay authority.
 
 #### Scenario: Lost launch reply with native replay evidence
-- **GIVEN** a new-protocol pending launch with safe native unknown-result evidence and a saved operationId
+- **GIVEN** a saved agent-protocol pending launch with safe native unknown-result evidence and a saved operationId
 - **WHEN** the user explicitly requests the matching replay on the original runtime
 - **THEN** the helper invokes the same launch with that operationId at most once, and verifies the returned exact outcome without a second fresh agent
 
