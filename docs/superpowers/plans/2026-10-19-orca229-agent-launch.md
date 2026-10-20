@@ -59,25 +59,36 @@ has no operationId/retrySafe. No second registry/runner or new dependency.
 ### Amendment task 2: Publish and activate
 
 - [x] Resolve project learning in existing recovery card/invariant/test mapping.
-- [ ] Fresh final source verification and distinct final Review of actual full
+- [x] Fresh final source verification and distinct final Review of actual full
   diff, learning/sensitive scope and an independent safety probe.
-- [ ] Stage only reviewed paths, Chinese Conventional Commit without coauthor,
+- [x] Stage only reviewed paths, Chinese Conventional Commit without coauthor,
   verify staged contents, normal push to existing `origin master`. Refuse remote
   divergence; no force, reset or clean.
-- [ ] Existing skill installer fetches the fixed published revision into private
+- [x] Existing skill installer fetches the fixed published revision into private
   staging; run `make check`. Preserve installed bytes/modes/inventory/aliases
   outside discovery and reject source/preimage drift.
-- [ ] Existing rsync copies only eight manifest files, without delete. Verify
+- [x] Existing rsync copies only eight manifest files, without delete. Verify
   actual aliases, hashes, nonpayload and installed unittest; final reviewer
   independently checks installation and claim boundaries.
-- [ ] Reconcile status/tasks, publish necessary closeout metadata and verify
-  remote HEAD plus workspace residue. Real new-instance verification awaits user.
+- [x] Reconcile status/tasks and prepare source-frozen closeout metadata for
+  scoped publication. Final Git/CI receipt must be checked after execution.
+  Real new-instance verification awaits user.
 
 Rollback: source preimage and accepted install preimage are retained privately.
 Restore only after no-later-drift checks within explicit rollback authority;
 never discard unknown work. Stop on changed protected scope, incompatible native
 contract, required new permissions, remote divergence, source/install drift,
 sensitive content or failed Review. Existing pending recovery stays deferred.
+
+Acceptance: source2152650 normally published, remote SHA verified and CI4/4
+success. Controller/source/stage/installed suites each139 PASS, distinct source
+and installation Reviews PASS. Only eight reviewed payload files activated;
+nonpayload, modes and both aliases preserved. The final administrative commit
+has parent2152650 and exactly status/plan/tasks/recovery-card paths; inspect Git
+history before repeating it. Its actual remote SHA/CI receipt is checked after
+commit/push, outside these self-referential bytes. The payload stays fixed and
+requires no reinstall for this metadata-only commit. Three original requirement
+drafts remain excluded, unchanged and owned by their original task.
 
 The sections below are historical records, not current exclusions.
 

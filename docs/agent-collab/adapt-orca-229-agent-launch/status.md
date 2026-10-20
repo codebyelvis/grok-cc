@@ -32,14 +32,50 @@ actual-helper probes confirm terminal outcome-before-inventory, handle occupancy
 reported-draft refusal,16 injected native-ID/retrySafe variants safely blocked,
 legacy no-ID/context drift refusal and safe error projection. No actionable
 implementation finding. Controller accepts this bounded evidence and promotes
-the retained project learning card/invariant/test mapping. Next: fresh final
-source verification and distinct Review. Publication and active installation
-have not occurred.
-Real new-instance validation still requires the user's separate confirmation.
+the retained project learning card/invariant/test mapping.
+
+Final source verification: controller make check139 PASS (6.759s), independent
+Codex mode-auto-final make check139 PASS (6.757s), full-diff/learning Review PASS
+with six actual-helper isolated adversarial cases. Final source report SHA256:
+fe78b929b8b75798bc466cbec5137f6f289111cd87390cb821c0c673f7edb6f9.
+
+Publication: source commit21526509a062d6b7acdf5b3a9570a33ca78d90e5, exactly16
+reviewed paths, was normally pushed to origin/master and remote SHA verified.
+[Source CI39374900912](https://github.com/codebyelvis/grok-cc/actions/runs/39374900912)
+completed all four macOS/Ubuntu Python3.11/3.13 jobs successfully.
+
+Local activation: official installer fetched that immutable published revision.
+All stage files equal Git blobs; stage make check139 PASS (6.901s). Accepted
+installed bytes/permissions/inventory/aliases were saved privately outside skill
+discovery and rechecked immediately before the bounded eight-file rsync. Actual
+Codex entry unittest139 PASS (6.410s); eight hashes and both existing aliases
+match, all payload modes and nonpayload content are preserved. This controller
+reread installed SKILL; other windows' instruction consumption is unverified.
+
+Independent installation acceptance: Codex mode-auto-final PASS, no actionable
+finding, independently installed139 PASS (6.664s), each of the two actual alias
+entrypoints passed six isolated safety cases. Report SHA256:
+f70ff1bc031e3810c925d9a82c0eb5b91f2f7668030fcca07ae9cbca9ceff9f9.
+Controller accepts publication/local-activation evidence only. No real Orca/CC,
+live registry, global/native config or existing pending/binding was accessed or
+changed in this amendment's implementation/installation tests.
+
+The local source/publication/activation acceptance is satisfied. Real new-instance
+validation still needs the user's separate confirmation; existing pending and
+historical unknown effects remain unverified. Keep this OpenSpec active for
+that distinct lifecycle, with user-owned confirmation as its resume condition.
+
+Final administrative action is the reviewed closeout docs commit/push: parent
+2152650, only this status, the existing plan/tasks and recovery learning card.
+Do not invent its self-referential hash here. On resume inspect actual master
+history before repeating it; if that exact child/paths already exists, verify
+remote SHA and unchanged payload instead. The actual commit/push/CI receipt is
+checked after execution and retained privately. Three original requirement
+drafts stay untouched/excluded for their owning task; no reset/clean is allowed.
 
 Historical checkpoints below do not override this amendment.
 
-## Current checkpoint
+## Historical checkpoint — 2026-10-19
 
 Gate0 continues the approved OpenSpec candidate and the user's explicit local Git authorization with no new branch. Integration-readiness FULL_PREFLIGHT PASS by independent Codex `/root/orca229_final_review`, control-plane-high, governed-review-evidence only; finding_completeness=true, no actionable finding. Frozen plan SHA58a6d8a67bb2cefd7fe6560ba81d62920c91bb4c5757e8a3898b675d18cf2f81 and preflight-v2 SHA321018488a21156efdf9ae00ae2a9d014c8715452774e9ea1e1bf3d3bcfd4685 accepted by controller.
 

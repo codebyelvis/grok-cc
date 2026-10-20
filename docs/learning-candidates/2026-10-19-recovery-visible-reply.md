@@ -21,8 +21,8 @@ target_artifacts: docs/engineering/engineering-invariants.md; docs/troubleshooti
 mechanical_enforcement: required
 mechanical_enforcement_reason: test_visible_screen_marker_without_receipt_stays_unaccepted 拒绝把可见标记当成受理。启动提示回归拒绝把 how does 提示当成草稿，也拒绝有任务历史后继续放行。宿主能力列表与 Mac CLI client capability 不一致这一点无法在本仓库内对 Orca 安装包做确定性测试。
 nonmechanical_boundary: 对抗审查必须拒绝这句推断：status 已列出 agent.launch.v2，所以客户端一定提交了它，或者原生退出 1 且没有 operationId 就是无副作用。也必须拒绝用屏幕全文或 tui-idle 宣布 helper 已受理。
-verification: 2026-10-20 主控make check139 PASS，独立实现审核make check139 PASS，dev5载荷、严格OpenSpec及diff核验通过。此时尚未推送或更新安装；后续事实以现有change的status/tasks记录。真实云端受理未验证。
-review_result: independent implementation PASS; distinct final Review pending
+verification: 2026-10-20 主控make check139 PASS，独立实现审核make check139 PASS，dev5载荷、严格OpenSpec及diff核验通过。固定源码2152650已推送并通过CI4/4，staging及实际安装各139项通过；独立安装139项及两入口隔离探针通过。来源、发布和安装详情见现有change的status/tasks，真实云端受理未验证。
+review_result: independent implementation PASS; distinct final source PASS; independent publication/installation acceptance PASS
 decision_owner: codex
 decision_provenance: 用户明确要求把本次长时间修复蒸馏进 grok-cc，防止再犯。提升与最终完成仍归 Codex 主控。
 ```
@@ -42,4 +42,4 @@ Orca全局agentDefaultArgs。只改变新实例，不能为通过auto检查去�
 另探测了终端协议伪造agent重放证据、已保存handle占用和结果持久顺序。
 
 源码的正确性、Git发布、active文件一致、其他窗口加载规则和真实云端
-行为分别验收。本轮仅准备源码发布与本地安装，不授权真实CC操作。
+行为分别验收。本轮源码已发布且本地安装已验收，不授权真实CC操作。

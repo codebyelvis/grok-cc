@@ -4,10 +4,10 @@
 - [x] Retain prerequisite and safety regressions; RED/GREEN for exact per-instance create and saved protocols.
 - [x] Synchronize helper/reference/docs/version/manifest; make check, strict validation and diff checks.
 - [x] Independent implementation Review; resolve findings and project learning.
-- [ ] Fresh final source verification and distinct final Review.
-- [ ] Scoped Chinese commits and normal push to existing origin/master; verify revision.
-- [ ] Published-revision staging, preimage and eight-file activation; aliases/hash/nonpayload/installed-suite and independent acceptance.
-- [ ] Publish closeout metadata; preserve deferred real new-instance verification boundary.
+- [x] Fresh final source verification and distinct final Review.
+- [x] Scoped Chinese commits and normal push to existing origin/master; verify revision.
+- [x] Published-revision staging, preimage and eight-file activation; aliases/hash/nonpayload/installed-suite and independent acceptance.
+- [x] Reconcile final closeout metadata and deferred real new-instance boundary; verify final metadata commit/push receipt after execution, without self-referential hashes.
 
 Historical task records follow. Real CC create/send, shared registry and existing
 pending/creating/bindings remain outside this amendment's acceptance.
@@ -37,4 +37,5 @@ Source artifact is prepared for review/integration; this is not whole-task compl
 - [x] Independently preflight the detached16-file commit and master fast-forward, then execute only that authorized Git scope (FULL_PREFLIGHT PASS; candidate4f25828, original master fast-forwarded, no new branch).
 - [x] Verify original-root preservation, exact commit contents, installed parity and main-root checks; obtain independent integration acceptance (Codex `/root/orca229_final_review` PASS, no actionable finding; exact three-document closeout ready).
 - [x] Obtain targeted cloud-side read-only reports and independently retest from Mac: normal watchdog sleep/14:06 recovery reported; at14:10 peer online, TCP6768 connected, Orca/graph ready, hello query succeeds and complete terminal list0. Freeze trigger, continuous availability and real CC usage remain unverified; desktop visual tool unavailable.
-- [ ] Publication and genuine cloud task acceptance remain outside this local integration/read-only phase. Keep the change active; do not equate installation or Git success with cloud availability or completed legacy recovery.
+- [x] Publication completed in the2026-10-20 amendment: source2152650, remote verified, CI4/4 successful.
+- [ ] Genuine cloud task/new-instance acceptance and existing pending recovery remain separately authorized future work. Keep the change active; installation/Git success does not prove cloud availability or completed legacy recovery.
