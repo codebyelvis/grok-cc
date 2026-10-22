@@ -2,7 +2,7 @@
 
 [简体中文](README.md) | [English](README.en.md)
 
-作者：elvis。当前版本：`0.1.0.dev3`，开发版本，尚无正式 release。
+作者：elvis。当前版本：`0.1.0.dev6`，开发版本，尚无正式 release。
 
 在 Mac 上读取项目，将必要源码交给 Grok Bot 云电脑里的 Claude Code，通过 Orca 回收补丁，再在 Mac 校验、应用和测试。
 
@@ -14,7 +14,7 @@ Mac 项目是源码真值。云端终端目录不等于 Mac 项目，也不会�
 
 ## 使用条件
 
-- Mac 本地已能使用 Codex，或用户已有的 Claudex；本项目不要求另行在 Mac 登录 Claude。
+- Mac 本地已能使用 Codex、用户已有的 Claudex 或 Grok CLI；本项目不要求另行在 Mac 登录 Claude。
 - 云电脑上的 Claude Code 已登录，Orca runtime 已配对且可达。
 - 使用目标环境的 Orca CLI；先加载它提供的 `orca-cli` guide，不从示例猜命令。
 - Python 3.11 及以上、Git；开发检查还需要 Make。helper 仅依赖 Python 标准库，使用 POSIX 文件锁与目录描述符，支持目标为 macOS/Linux，不支持 Windows 原生 Python。
@@ -28,11 +28,13 @@ Python 版本兼容矩阵由 CI 配置定义；配置存在不代表远端 CI �
 ```text
 Codex：$grok-cc 修复当前项目中某个明确问题，并在 Mac 验证
 Claudex：/grok-cc 修复当前项目中某个明确问题，并在 Mac 验证
+Grok CLI：调用 grok-cc 修复当前项目中某个明确问题，并在 Mac 验证
 ```
 
 任务需要明确修改范围和验收条件。助手按照 [SKILL.md](SKILL.md) 操作，不能把示例占位任务直接派发。
 
 - 同一真实 Mac 会话固定一个云端 CC；不同会话不共用。
+- 已知绑定及精确目标时直接`send`，它完成所有发送前核验；`ensure`仅作可选诊断。Grok CLI须显式传入真实会话ID，不能在Codex/Claudex原生环境下换身份调用。
 - 不自动新建终端；`ensure`只核验已有绑定。无绑定先用`create --project <完整云端worktreeID>`只读展示计划，用户明确选择后才加`--confirm`。本地持久reservation保证同一registry每intent最多一次提交；没有原生caller-key去重，未知结果不再创建。
 - busy、offline、身份变化或未知发送结果时保留原绑定，不换窗、不盲目重发。
 - accepted/未知结果的同 task/message/文本调用只恢复记录；仅证明子进程未启动的 not_sent 可同文显式重试，task 累计最多 2 次（含合法格式导出），换 ID 不能绕过。
@@ -40,7 +42,7 @@ Claudex：/grok-cc 修复当前项目中某个明确问题，并在 Mac 验证
 - 默认要求完整任务标记、PATCH_SHA256/PATCH_LINES 与原字节一致，并通过原 packet 白名单/基线/路径检查；旧回复仅显式 `--allow-unhashed`。`input_accepted`、`tui-idle` 或截图不等于产物通过。
 - `finish` 释放派活占用并保留绑定，返回 `project_pass=false`，不代表项目验收成功。
 
-prepare/render共用默认120KiB外发预算和secret扫描，先小白名单起步；render不外发Mac root或基线hash，prompt要求补丁外最多10行结论。可选handoff-summary只总结显式证据，缺证据即未验证，helper不写云端。
+prepare/render共用默认120KiB外发预算和secret扫描，先小白名单起步；显式提高预算仍受450KiB传输上限限制。NUL及保留消息标记在准备阶段即拒绝。render不外发Mac root或基线hash，发送保留CR/CRLF原字节；prompt要求补丁外最多10行结论，并使用不带Git元数据的最小文本diff。输出可使用/tmp等解析后仍在项目外的父目录别名。可选handoff-summary只总结显式证据，缺证据即未验证，helper不写云端。
 
 详细规则：[会话绑定](references/session-binding.md)、[最终补丁请求与阻碍分类](references/final-patch-prompt.md)。
 

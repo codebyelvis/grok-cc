@@ -20,6 +20,7 @@ sys.path.insert(0, str(SCRIPTS))
 TARGET = SCRIPTS / 'session_binding.py'
 OWNER_A = {'controller': 'codex', 'session_id': '11111111-1111-4111-8111-111111111111'}
 OWNER_B = {'controller': 'claudex', 'session_id': '22222222-2222-4222-8222-222222222222'}
+OWNER_G = {'controller': 'grok', 'session_id': '33333333-3333-4333-8333-33333333333a'}
 WORKTREE = 'repo::/home/box/orca/projects/hello'
 LAUNCH_CAPABILITIES = ['agent.launch.v2', 'agent.launch.replay-required.v1',
                        'agent.launch.local-presentation.v1']
@@ -125,6 +126,12 @@ class RemoteOrca:
 
 class BindingTests(unittest.TestCase):
     def setUp(self):
+        # Isolate from the real controller session env (e.g. tests run inside Codex/Claude).
+        _env = patch.dict(os.environ)
+        _env.start()
+        self.addCleanup(_env.stop)
+        for _name in ('CODEX_THREAD_ID', 'CLAUDE_SESSION_ID', 'GROK_SESSION_ID'):
+            os.environ.pop(_name, None)
         self.tmp = tempfile.TemporaryDirectory()
         self.addCleanup(self.tmp.cleanup)
         self.root = Path(self.tmp.name).resolve()
@@ -199,11 +206,57 @@ elif action=='launch':
   time.sleep(.1)
 elif action=='wait': r={'wait':{'satisfied':True}}
 elif action=='read': r={'terminal':{'handle':'term-cli','tail':['────────','❯','────────','auto mode on'],'source':'screen' if '--screen' in args else 'stream','truncated':False,'limited':False,'latestCursor':'1'}}
+elif action=='send': r={'send':{'handle':'term-cli','accepted':True,'prompt':{'requestId':'request-cli','processIncarnation':'inc-cli','stages':['input_accepted','turn_started']}}}
 else: raise SystemExit('unsupported fixture operation')
 print(json.dumps({'ok':True,'result':r,'_meta':{'runtimeId':'runtime-cli'}}))
 ''')
         path.chmod(0o700)
         return path
+
+    def test_prepare_render_send_cli_preserves_crlf_and_bare_cr_bytes(self):
+        executable = self.cli_fixture()
+        env = self.fixture_env()
+        common = ['--controller', 'codex', '--project-root', str(self.project),
+                  '--worktree', WORKTREE, '--state-dir', str(self.state), '--orca', str(executable)]
+        created = subprocess.run([sys.executable, '-B', str(TARGET), 'create', *common,
+            '--project', WORKTREE, '--confirm'], env=env, capture_output=True, text=True, timeout=15)
+        self.assertEqual(created.returncode, 0, created.stderr)
+        source = b'first\r\nsecond\rthird\n'
+        (self.project / 'notes.txt').write_bytes(source)
+        packet, prompt = self.root / 'packet.json', self.root / 'reviewed.txt'
+        for command in ([str(SCRIPTS / 'task_packet.py'), 'prepare', '--root', str(self.project),
+                         '--file', 'notes.txt', '--task', 'Preserve the supplied line endings', '--out', str(packet)],
+                        [str(SCRIPTS / 'task_packet.py'), 'render', '--packet', str(packet), '--out', str(prompt)]):
+            result = subprocess.run([sys.executable, '-B', *command], env=env,
+                                    capture_output=True, text=True, timeout=15)
+            self.assertEqual(result.returncode, 0, result.stderr)
+        reviewed = prompt.read_bytes()
+        self.assertIn(source, reviewed)
+        task_id = json.loads(packet.read_bytes())['task_id']
+        sent = subprocess.run([sys.executable, '-B', str(TARGET), 'send', *common,
+            '--task-id', task_id, '--text-file', str(prompt)], env=env,
+            capture_output=True, text=True, timeout=15)
+        self.assertEqual(sent.returncode, 0, sent.stderr)
+        calls = [json.loads(line) for line in (self.root / 'native-calls.jsonl').read_text().splitlines()]
+        sends = [args for args in calls if args[:2] == ['terminal', 'send']]
+        self.assertEqual(len(sends), 1)
+        digest = self.mod.hashlib.sha256(reviewed).hexdigest()
+        expected = reviewed + ('\n\ngrok-cc-msg:' + task_id + '/main/' + digest[:8]).encode()
+        self.assertEqual(sends[0][sends[0].index('--text') + 1].encode(), expected)
+        self.assertEqual(json.loads(sent.stdout)['message']['sha256'], digest)
+
+    def test_send_transport_rejection_preserves_state_before_native_calls(self):
+        m = self.manager(); m.create(confirm=True)
+        before = (self.state / 'bindings.json').read_bytes()
+        calls = len(self.remote.calls)
+        for text in (None, 42, b'bytes', '', ' \r\n\t', 'grok-cc-msg:reserved',
+                     'x' * (450 * 1024 + 1), '汉' * (150 * 1024 + 1), 'has\0nul'):
+            with self.subTest(kind=type(text).__name__, size=len(text) if isinstance(text, (str, bytes)) else None):
+                with self.assertRaises(self.mod.Blocked) as caught:
+                    m.send('task-one', 'main', text)
+                self.assertEqual(caught.exception.category, 'invalid_input')
+                self.assertEqual((self.state / 'bindings.json').read_bytes(), before)
+                self.assertEqual(len(self.remote.calls), calls)
 
     def test_relative_executable_is_pinned_from_child_cwd_before_every_native_call(self):
         source = self.cli_fixture()
@@ -424,7 +477,8 @@ print(json.dumps({'ok':True,'result':r,'_meta':{'runtimeId':'runtime-cli'}}))
                    '--project-root', str(self.project), '--project', WORKTREE, '--confirm',
                    '--state-dir', str(self.state), '--orca', str(executable)]
         # A pre-upgrade agent.launch.v2 reservation; new reservations use the auto terminal path.
-        legacy = [sys.executable, '-B', '-c', 'import runpy,sys;sys.argv=sys.argv[1:];'
+        legacy = [sys.executable, '-B', '-c', 'import pathlib,runpy,sys;sys.argv=sys.argv[1:];'
+                  'sys.path.insert(0,str(pathlib.Path(sys.argv[0]).parent));'
                   'm=runpy.run_path(sys.argv[0]);m["NEW_CREATE_PROTOCOL"]="agent.launch.v2";'
                   'g=m["main"].__globals__;g["NEW_CREATE_PROTOCOL"]="agent.launch.v2";sys.exit(m["main"]())',
                   str(TARGET), *command[3:]]
@@ -1181,6 +1235,98 @@ print(json.dumps({'ok':True,'result':r,'_meta':{'runtimeId':'runtime-cli'}}))
             self.assertEqual(self.mod.resolve_owner('codex', None), OWNER_A)
             with self.assertRaises(ValueError): self.mod.resolve_owner('codex', OWNER_B['session_id'])
 
+    def test_codex_controller_uses_native_thread(self):
+        with patch.dict(os.environ, {'CODEX_THREAD_ID': OWNER_A['session_id']}, clear=True):
+            self.assertEqual(self.mod.resolve_owner('codex', None), OWNER_A)
+            self.assertEqual(self.mod.resolve_owner(None, None), OWNER_A)
+            with self.assertRaises(ValueError): self.mod.resolve_owner('codex', OWNER_G['session_id'])
+
+    def test_claudex_controller_matches_env_and_rejects_other_controllers(self):
+        b, g = OWNER_B['session_id'], OWNER_G['session_id']
+        with patch.dict(os.environ, {'CLAUDE_SESSION_ID': b}, clear=True):
+            self.assertEqual(self.mod.resolve_owner('claudex', None), OWNER_B)
+            self.assertEqual(self.mod.resolve_owner('claudex', b.upper()), OWNER_B)
+            self.assertEqual(self.mod.resolve_owner(None, None), OWNER_B)
+            with self.assertRaises(ValueError): self.mod.resolve_owner('claudex', g)
+        with patch.dict(os.environ, {'CODEX_THREAD_ID': OWNER_A['session_id']}, clear=True):
+            with self.assertRaises(ValueError): self.mod.resolve_owner('claudex', b)
+            with self.assertRaises(ValueError): self.mod.resolve_owner('claudex', g)
+        with patch.dict(os.environ, {}, clear=True):
+            self.assertEqual(self.mod.resolve_owner('claudex', b), OWNER_B)
+
+    def test_grok_controller_requires_explicit_uuid(self):
+        g = OWNER_G['session_id']
+        with patch.dict(os.environ, {}, clear=True):
+            self.assertEqual(self.mod.resolve_owner('grok', g), OWNER_G)
+            self.assertEqual(self.mod.resolve_owner('grok', g.upper()), OWNER_G)
+            for bad in (None, '', '${GROK_SESSION_ID}', 'not-a-uuid'):
+                with self.assertRaises(ValueError): self.mod.resolve_owner('grok', bad)
+            with self.assertRaises(ValueError): self.mod.resolve_owner('grokbot', g)
+        with patch.dict(os.environ, {'GROK_SESSION_ID': g}, clear=True):
+            with self.assertRaises(ValueError): self.mod.resolve_owner('grok', None)
+
+    def test_grok_rejects_foreign_native_env_even_with_unrelated_uuid(self):
+        for name, owner in (('CODEX_THREAD_ID', OWNER_A), ('CLAUDE_SESSION_ID', OWNER_B)):
+            with self.subTest(native=name), patch.dict(os.environ, {name: owner['session_id']}, clear=True):
+                with self.assertRaises(ValueError):
+                    self.mod.resolve_owner('grok', OWNER_G['session_id'])
+                env = self.fixture_env()
+                for key in ('CODEX_THREAD_ID', 'CLAUDE_SESSION_ID'):
+                    env.pop(key, None)
+                env[name] = owner['session_id']
+                prompt = self.root / 'reviewed-prompt'
+                prompt.write_text('reviewed task')
+                result = subprocess.run([sys.executable, '-B', str(TARGET), 'send',
+                    '--controller', 'grok', '--session-id', OWNER_G['session_id'],
+                    '--project-root', str(self.project), '--worktree', WORKTREE,
+                    '--state-dir', str(self.state), '--task-id', 'task-one',
+                    '--text-file', str(prompt)],
+                    capture_output=True, text=True, env=env)
+                self.assertNotEqual(result.returncode, 0)
+                self.assertFalse(self.state.exists())
+                self.assertEqual(json.loads(result.stderr)['read_attempts'], 0)
+
+    def test_cross_mapping_between_controllers_is_rejected(self):
+        a, b = OWNER_A['session_id'], OWNER_B['session_id']
+        with patch.dict(os.environ, {'CODEX_THREAD_ID': a, 'CLAUDE_SESSION_ID': b}, clear=True):
+            for ctl, sid in [('claudex', a), ('grok', a), ('grok', b), ('codex', b)]:
+                with self.subTest(ctl=ctl, sid=sid), self.assertRaises(ValueError):
+                    self.mod.resolve_owner(ctl, sid)
+        keys = {self.mod.owner_key({'controller': c, 'session_id': OWNER_G['session_id']})
+                for c in self.mod.CONTROLLERS}
+        self.assertEqual(len(keys), 3)
+
+    def test_controller_autodetect_errors_on_none_or_ambiguous(self):
+        for env in ({}, {'CODEX_THREAD_ID': OWNER_A['session_id'], 'CLAUDE_SESSION_ID': OWNER_B['session_id']}):
+            with patch.dict(os.environ, env, clear=True), self.assertRaises(ValueError) as caught:
+                self.mod.resolve_owner(None, OWNER_G['session_id'])
+            self.assertIn('--controller', str(caught.exception))
+
+    def test_grok_binding_is_separate_and_legacy_keys_unchanged(self):
+        import hashlib
+        legacy = hashlib.sha256(('claudex\0' + OWNER_B['session_id']).encode()).hexdigest()
+        self.assertEqual(self.mod.owner_key(OWNER_B), legacy)
+        self.manager(OWNER_B).create(confirm=True)
+        bound = self.manager(OWNER_G).create(confirm=True)
+        self.assertEqual(self.manager(OWNER_G).ensure()['handle'], bound['handle'])
+        self.manager(OWNER_G).send('task-one', 'main', 'text')
+        data = json.loads((self.state / 'bindings.json').read_text())
+        self.assertIn(legacy, data['bindings'])
+        self.assertIn(self.mod.owner_key(OWNER_G), data['bindings'])
+        twin = {'controller': 'claudex', 'session_id': OWNER_G['session_id']}
+        self.assertNotIn(self.mod.owner_key(twin), data['bindings'])
+
+    def test_grok_controller_cli_identity(self):
+        env = dict(self.fixture_env()); env.pop('CODEX_THREAD_ID', None); env.pop('CLAUDE_SESSION_ID', None)
+        ok = subprocess.run([sys.executable, '-B', str(TARGET), 'identity', '--controller', 'grok',
+                             '--session-id', OWNER_G['session_id']], capture_output=True, text=True, env=env)
+        self.assertEqual(ok.returncode, 0, ok.stderr)
+        self.assertEqual(json.loads(ok.stdout)['owner'], OWNER_G)
+        bad = subprocess.run([sys.executable, '-B', str(TARGET), 'identity', '--controller', 'claudex',
+                              '--session-id', OWNER_G['session_id']], capture_output=True, text=True,
+                             env={**env, 'CLAUDE_SESSION_ID': OWNER_B['session_id']})
+        self.assertNotEqual(bad.returncode, 0)
+
     def test_legacy_receipt_adoption_is_not_an_available_mutation(self):
         result = subprocess.run([sys.executable, '-B', str(TARGET), 'ensure', '--adopt-terminal', 'foreign'], capture_output=True, env=self.fixture_env())
         self.assertNotEqual(result.returncode, 0)
@@ -1240,6 +1386,122 @@ print(json.dumps({'ok':True,'result':r,'_meta':{'runtimeId':'runtime-process'}})
     def failure(self, kind='nonzero', **kwargs):
         return self.mod.NativeFailure(kind, **kwargs)
 
+    def native_pipe_holder(self, escaped):
+        fixture = self.root / 'pipe-holder'
+        fixture.write_text('#!' + sys.executable + '\n' + '''
+import json,os,pathlib,time
+p=pathlib.Path(__file__).parent
+with (p/'native-starts').open('a') as f: f.write('start\\n')
+child=os.fork()
+if child==0:
+ if ESCAPED: os.setsid()
+ (p/'child-ready').write_text(json.dumps({'pid':os.getpid(),'pgid':os.getpgrp()}))
+ deadline=time.monotonic()+8
+ while time.monotonic()<deadline and not (p/'release-child').exists():
+  (p/'child-heartbeat').write_text(str(time.monotonic_ns()))
+  time.sleep(.01)
+ (p/'child-stopped').touch()
+ os._exit(0)
+while not (p/'child-ready').exists(): time.sleep(.01)
+(p/'parent-ready').write_text(json.dumps({'pid':os.getpid(),'pgid':os.getpgrp()}))
+deadline=time.monotonic()+8
+while time.monotonic()<deadline and not (p/'release-child').exists(): time.sleep(.01)
+'''.replace('ESCAPED', repr(escaped)))
+        fixture.chmod(0o700)
+        # Escaped descendants are self-limiting and also receive an early-exit signal on failure.
+        def release():
+            (self.root / 'release-child').touch()
+            ready = self.root / 'child-ready'
+            if not ready.exists(): return
+            pid = json.loads(ready.read_text())['pid']
+            deadline = time.monotonic() + 2
+            while not (self.root / 'child-stopped').exists():
+                try:
+                    os.kill(pid, 0)  # existence check only, never signal an unrelated process
+                except ProcessLookupError:
+                    return
+                if time.monotonic() >= deadline:
+                    self.fail('Fixture descendant did not acknowledge its exit signal')
+                time.sleep(.01)
+        self.addCleanup(release)
+        return self.mod.NativeOrca(str(fixture), cwd=str(self.project))
+
+    def assert_bounded_native_cleanup(self, escaped, read_error=False):
+        native = self.native_pipe_holder(escaped)
+        real_popen = subprocess.Popen
+        def start(*args, **kwargs):
+            process = real_popen(*args, **kwargs)
+            communicate = process.communicate
+            first = True
+            def fail_read_once(timeout=None):
+                nonlocal first
+                if first:
+                    first = False
+                    deadline = time.monotonic() + 2
+                    while not (self.root / 'parent-ready').exists() and time.monotonic() < deadline:
+                        time.sleep(.01)
+                    raise OSError('fixture pipe read failure')
+                return communicate(timeout=timeout)
+            if read_error:
+                process.communicate = fail_read_once
+            return process
+        started = time.monotonic()
+        with patch.dict(os.environ, self.fixture_env()), patch.object(self.mod.subprocess, 'Popen', side_effect=start):
+            with self.assertRaises(self.mod.NativeFailure) as caught:
+                native(['terminal', 'send'], timeout=.5)
+        elapsed = time.monotonic() - started
+        self.assertLess(elapsed, 4.5, 'Cleanup waited for inherited pipes instead of its finite deadline')
+        self.assertTrue(caught.exception.started)
+        self.assertEqual(caught.exception.kind, 'invalid_result' if read_error else 'timeout')
+        parent = json.loads((self.root / 'parent-ready').read_text())
+        child = json.loads((self.root / 'child-ready').read_text())
+        self.assertEqual(parent['pid'], parent['pgid'])
+        self.assertNotEqual(parent['pgid'], os.getpgrp())
+        self.assertEqual(child['pgid'], child['pid'] if escaped else parent['pgid'])
+        if not escaped:
+            heartbeat = (self.root / 'child-heartbeat').read_bytes()
+            time.sleep(.1)
+            self.assertEqual((self.root / 'child-heartbeat').read_bytes(), heartbeat,
+                             'Same-group descendant remained alive after cleanup')
+
+    def test_native_timeout_kills_only_owned_process_group(self):
+        self.assert_bounded_native_cleanup(False)
+
+    def test_native_timeout_is_bounded_when_descendant_escapes_with_pipes(self):
+        self.assert_bounded_native_cleanup(True)
+
+    def test_native_read_failure_is_bounded_when_descendant_escapes_with_pipes(self):
+        self.assert_bounded_native_cleanup(True, read_error=True)
+
+    def test_native_invalid_utf8_returns_structured_failure_after_cleanup(self):
+        fixture = self.root / 'invalid-utf8'
+        fixture.write_text('#!' + sys.executable + '\nimport os\nos.write(1, b"\\xff")\n')
+        fixture.chmod(0o700)
+        with patch.dict(os.environ, self.fixture_env()):
+            with self.assertRaises(self.mod.NativeFailure) as caught:
+                self.mod.NativeOrca(str(fixture))(['terminal', 'send'], timeout=.2)
+        self.assertEqual(caught.exception.kind, 'invalid_result')
+        self.assertTrue(caught.exception.started)
+
+    def test_native_cleanup_timeout_retains_sending_intent_without_resubmit(self):
+        m = self.manager(); m.create(confirm=True)
+        native = self.native_pipe_holder(True)
+        def dispatch(args, timeout=None):
+            if args[:2] == ['terminal', 'send']:
+                return native(args, timeout=.5)
+            return self.remote(args, timeout=timeout)
+        m.orca = dispatch
+        with patch.dict(os.environ, self.fixture_env()):
+            with self.assertRaises(self.mod.Blocked) as caught:
+                m.send('task-one', 'main', 'reviewed task')
+        self.assertEqual(caught.exception.category, 'uncertain_send')
+        message = self.saved()['tasks']['task-one']['messages']['main']
+        self.assertEqual(message['state'], 'sending')
+        self.assertEqual(message['error']['kind'], 'timeout')
+        self.assertEqual(m.send('task-one', 'main', 'reviewed task')['action'], 'resume')
+        self.assertEqual((self.root / 'native-starts').read_text(), 'start\n')
+        self.assertEqual(self.remote.creates, 1)
+
     def test_native_launch_is_distinct_from_started_failure_and_safe(self):
         native = self.mod.NativeOrca('/fixture/not-real')
         with patch.object(self.mod.subprocess, 'Popen', side_effect=FileNotFoundError('SECRET path')):
@@ -1268,14 +1530,16 @@ print(json.dumps({'ok':True,'result':r,'_meta':{'runtimeId':'runtime-process'}})
                     native(['terminal', 'send'])
             self.assertTrue(caught.exception.started)
             self.assertNotIn('SECRET', str(caught.exception))
-        process = Mock()
+        process = Mock(pid=123456789)
         process.communicate.side_effect = [subprocess.TimeoutExpired('SECRET', 60, stderr='SECRET'), ('', '')]
-        with patch.object(self.mod.subprocess, 'Popen', return_value=process):
+        with patch.object(self.mod.subprocess, 'Popen', return_value=process), \
+                patch.object(self.mod.os, 'killpg') as killpg:
             with self.assertRaises(self.mod.NativeFailure) as caught:
                 native(['terminal', 'send'])
         self.assertTrue(caught.exception.started)
         self.assertEqual(caught.exception.timeout, 60)
-        process.kill.assert_called_once()
+        killpg.assert_called_once_with(process.pid, self.mod.signal.SIGKILL)
+        self.assertEqual(process.communicate.call_args.kwargs['timeout'], 1)
 
     def test_send_minimizes_receipt_and_adds_stable_marker(self):
         m = self.manager(); m.create(confirm=True)
@@ -1441,6 +1705,94 @@ print(json.dumps({'ok':True,'result':r,'_meta':{'runtimeId':'runtime-process'}})
         with self.mod.Registry(self.state) as db:
             self.assertEqual(db.data['bindings'][self.mod.owner_key(OWNER_B)]['note'], 'send')
         self.assertEqual(self.saved()['tasks']['task-one']['messages']['main']['state'], 'accepted')
+
+    def reconcile_during_send(self, message_id, failure=None):
+        m = self.manager(); m.create(confirm=True)
+        if message_id != 'main':
+            m.send('task-one', 'main', 'main text')
+        observations = {}
+        def observe(args):
+            if args[:2] != ['terminal', 'send']: return None
+            result = self.manager().reconcile('task-one')  # default observes main and pending export
+            observations.update({mid: msg['evidence'] for mid, msg in result['messages'].items()})
+            with self.mod.Registry(self.state) as db:
+                db.data['bindings'][self.mod.owner_key(OWNER_B)] = {'owner': OWNER_B, 'note': 'observed'}
+                db.save()
+            if failure is not None:
+                raise failure
+        self.remote.hook = observe
+        if failure is None:
+            result = m.send('task-one', message_id, 'reviewed text')
+            self.assertEqual(result['action'], 'sent')
+        else:
+            with self.assertRaises(self.mod.Blocked) as caught:
+                m.send('task-one', message_id, 'reviewed text')
+            self.assertEqual(caught.exception.category, 'uncertain_send')
+        messages = self.saved()['tasks']['task-one']['messages']
+        self.assertEqual(set(observations), {'main'} if message_id == 'main' else {'main', 'export-1'})
+        for mid, evidence in observations.items():
+            self.assertEqual(messages[mid]['evidence'], evidence)
+        with self.mod.Registry(self.state) as db:
+            self.assertEqual(db.data['bindings'][self.mod.owner_key(OWNER_B)]['note'], 'observed')
+        target = messages[message_id]
+        self.assertEqual(target['state'], 'accepted' if failure is None else 'sending')
+        if failure is None:
+            self.assertTrue(target['receipt']['accepted'])
+        else:
+            self.assertEqual(target['error']['kind'], failure.kind)
+            if failure.receipt:
+                self.assertEqual(target['receipt'], failure.receipt)
+        self.assertEqual(m.send('task-one', message_id, 'reviewed text')['action'], 'resume')
+        sends = [args for args, _ in self.remote.calls if args[:2] == ['terminal', 'send']]
+        self.assertEqual(len(sends), 1 if message_id == 'main' else 2)
+
+    def test_reconcile_during_send_preserves_accepted_main_receipt(self):
+        self.reconcile_during_send('main')
+
+    def test_reconcile_during_send_preserves_main_and_export_evidence(self):
+        self.reconcile_during_send('export-1')
+
+    def test_reconcile_during_send_preserves_uncertain_error_and_receipt(self):
+        for mid in ('main', 'export-1'):
+            for receipt in ({}, {'requestId': 'request-uncertain', 'accepted': False}):
+                with self.subTest(message=mid, receipt=bool(receipt)):
+                    self.state = self.root / (mid + ('-receipt' if receipt else '-empty'))
+                    self.remote = RemoteOrca()
+                    self.reconcile_during_send(mid, self.failure('nonzero', receipt=receipt, returncode=1))
+
+    def test_late_receipt_rejects_every_non_evidence_intent_change(self):
+        mutations = {
+            'attempt_id': lambda r: r['tasks']['task-one']['messages']['main'].update(attempt_id='new-intent'),
+            'sha256': lambda r: r['tasks']['task-one']['messages']['main'].update(sha256='different'),
+            'cursor': lambda r: r['tasks']['task-one']['messages']['main'].update(cursor='42'),
+            'message_attempts': lambda r: r['tasks']['task-one']['messages']['main'].update(attempts=2),
+            'task_attempts': lambda r: r['tasks']['task-one'].update(attempts=2),
+            'receipt': lambda r: r['tasks']['task-one']['messages']['main'].update(receipt={'requestId': 'other'}),
+            'state': lambda r: r['tasks']['task-one']['messages']['main'].update(state='not_sent'),
+            'closed': lambda r: r['tasks']['task-one'].update(closed=True),
+            'active_task': lambda r: r.update(active_task=None),
+            'incarnation': lambda r: r.update(incarnation='inc-other'),
+            'new_message': lambda r: r['tasks']['task-one']['messages'].update(other={'evidence': {}}),
+            'new_task': lambda r: r['tasks'].update(other={'messages': {}}),
+        }
+        for name, mutate in mutations.items():
+            for uncertain in (False, True):
+                with self.subTest(field=name, uncertain=uncertain):
+                    self.state = self.root / (name + str(uncertain)); self.remote = RemoteOrca()
+                    m = self.manager(); m.create(confirm=True)
+                    changed = {}
+                    def drift(args):
+                        if args[:2] != ['terminal', 'send']: return None
+                        self.manager().reconcile('task-one')
+                        self.change_row(mutate)
+                        changed.update(self.saved())
+                        if uncertain: raise self.failure('timeout', timeout=1)
+                    self.remote.hook = drift
+                    with self.assertRaises(self.mod.Blocked) as caught:
+                        m.send('task-one', 'main', 'text')
+                    self.assertIn(caught.exception.category, ('busy', 'identity_changed'))
+                    self.assertEqual(self.saved(), changed)
+                    self.assertEqual(len([a for a, _ in self.remote.calls if a[:2] == ['terminal', 'send']]), 1)
 
     def test_late_receipt_does_not_overwrite_changed_intent(self):
         m = self.manager(); m.create(confirm=True)

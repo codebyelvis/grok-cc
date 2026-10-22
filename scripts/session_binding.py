@@ -11,11 +11,14 @@ import os
 from pathlib import Path
 import re
 import shutil
+import signal
 import stat
 import subprocess
 import sys
 import time
 import uuid
+
+from task_packet import validate_prompt_transport
 
 
 class Blocked(ValueError):
@@ -242,21 +245,53 @@ def _command(method):
     return call
 
 
+# Each controller owns its identity; ids are never cross-mapped between controllers.
+# grok = Grok CLI (grokcli). No Grok CLI session env var is documented or installed on
+# this box, so its id must always be passed explicitly with --session-id.
+CONTROLLER_ENV = {'codex': 'CODEX_THREAD_ID', 'claudex': 'CLAUDE_SESSION_ID', 'grok': None}
+CONTROLLERS = tuple(CONTROLLER_ENV)
+
+
+def _uuid_or_none(value):
+    try:
+        return value.lower() if value and str(uuid.UUID(value)) == value.lower() else None
+    except (ValueError, AttributeError, TypeError):
+        return None
+
+
+def detect_controller():
+    found = [name for name, var in CONTROLLER_ENV.items() if var and os.environ.get(var)]
+    if len(found) != 1:
+        raise ValueError('Cannot infer controller (%s); pass --controller codex|claudex|grok explicitly'
+                         % ('ambiguous: ' + ', '.join(found) if found else 'no native session env'))
+    return found[0]
+
+
 def resolve_owner(controller, session_id=None):
-    if controller not in ('codex', 'claudex'):
+    if controller is None:
+        controller = detect_controller()
+    if controller not in CONTROLLERS:
         raise ValueError('Unsupported local controller')
-    native = os.environ.get('CODEX_THREAD_ID') if controller == 'codex' else None
+    own_var = CONTROLLER_ENV[controller]
+    native = os.environ.get(own_var) if own_var else None
     if controller == 'codex' and not native:
         raise ValueError('Native CODEX_THREAD_ID is required; a supplied UUID cannot replace it')
-    if native and session_id and native != session_id:
-        raise ValueError('Session ID differs from the current native Codex thread')
-    session_id = session_id or native
-    try:
-        if not session_id or str(uuid.UUID(session_id)) != session_id.lower():
-            raise ValueError()
-    except (ValueError, AttributeError):
-        raise ValueError('Need the actual native conversation ID; unresolved placeholders are refused') from None
-    return {'controller': controller, 'session_id': session_id.lower()}
+    if controller == 'claudex' and not native and os.environ.get('CODEX_THREAD_ID'):
+        raise ValueError('Environment indicates a Codex session, not Claudex; use --controller codex')
+    if controller == 'grok' and any(os.environ.get(var) for var in CONTROLLER_ENV.values() if var):
+        raise ValueError('Native session environment belongs to another controller; do not select Grok')
+    if controller == 'grok' and not session_id:
+        raise ValueError('Grok CLI session ID must be passed explicitly with --session-id')
+    if native and session_id and native.lower() != session_id.lower():
+        raise ValueError('Session ID differs from the current native %s session' % controller)
+    session_id = _uuid_or_none(session_id or native)
+    if not session_id:
+        raise ValueError('Need the actual native conversation ID; unresolved placeholders are refused')
+    for other, var in CONTROLLER_ENV.items():
+        value = os.environ.get(var) if var and other != controller else None
+        if value and value.lower() == session_id:
+            raise ValueError('Session ID belongs to the %s controller; never cross-map it' % other)
+    return {'controller': controller, 'session_id': session_id}
 
 
 def owner_key(owner):
@@ -391,24 +426,48 @@ class NativeOrca:
         self.cwd = str(directory)
         return {'executable': self.executable, 'cwd': self.cwd}
 
+    @staticmethod
+    def _stop(process):
+        # Popen creates this session/group; never signal the caller's process group.
+        try:
+            os.killpg(process.pid, signal.SIGKILL)
+        except OSError:
+            try:
+                process.kill()
+            except OSError:
+                pass
+        try:
+            process.communicate(timeout=1)
+        except (subprocess.TimeoutExpired, OSError, ValueError):
+            # A descendant can escape the group while retaining either pipe. Do not await EOF.
+            for pipe in (process.stdout, process.stderr):
+                if pipe is not None:
+                    try:
+                        pipe.close()
+                    except OSError:
+                        pass
+            try:
+                process.wait(timeout=1)
+            except (subprocess.TimeoutExpired, OSError):
+                pass
+
     def __call__(self, args, timeout=None):
         timeout = timeout if timeout is not None else (180 if args[:2] == ['agent', 'launch'] else
                                                       60 if args[:2] == ['terminal', 'send'] else 30)
         try:
             process = subprocess.Popen([self.executable, *args], stdout=subprocess.PIPE,
-                                       stderr=subprocess.PIPE, text=True, encoding='utf-8', cwd=self.cwd)
+                                       stderr=subprocess.PIPE, text=True, encoding='utf-8', cwd=self.cwd,
+                                       start_new_session=True)
         except OSError as exc:
             # Popen did not return a child: positive local no-acceptance evidence.
             raise NativeFailure('launch', started=False, stderr=str(exc)) from None
         try:
             stdout, stderr = process.communicate(timeout=timeout)
         except subprocess.TimeoutExpired as exc:
-            process.kill()
-            process.communicate()
+            self._stop(process)
             raise NativeFailure('timeout', timeout=timeout, stderr=exc.stderr) from None
         except (OSError, UnicodeError):
-            process.kill()
-            process.communicate()
+            self._stop(process)
             raise NativeFailure('invalid_result') from None
         try:
             result = json.loads(stdout)
@@ -539,6 +598,19 @@ class BindingManager:
             category = 'identity_changed' if any(row.get(k) != snapshot.get(k) for k in identity) else 'busy'
             raise Blocked(category, 'Binding or intent changed during operation; retain current state')
         return row
+
+    def _send_unchanged(self, db, intent):
+        # Reconcile may observe every existing message while this send awaits its receipt.
+        # Only those observations may differ; all identities, tasks and attempts stay exact.
+        current = self._row(db)
+        expected = copy.deepcopy(intent)
+        for task_id, task in expected['tasks'].items():
+            latest = current['tasks'].get(task_id, {}).get('messages', {})
+            for message_id, message in task['messages'].items():
+                message.pop('evidence', None)
+                if 'evidence' in latest.get(message_id, {}):
+                    message['evidence'] = copy.deepcopy(latest[message_id]['evidence'])
+        return self._unchanged(db, expected)
 
     def _verify(self, row):
         runtime, terminals = self._list()
@@ -898,10 +970,12 @@ class BindingManager:
         if retry_request is not None:
             raise Blocked('unsupported_contract', 'Native request retry contract is unavailable')
         if (not isinstance(task_id, str) or not re.fullmatch(r'[A-Za-z0-9._:-]{1,128}', task_id)
-                or not isinstance(message_id, str) or not re.fullmatch(r'main|export-[1-9][0-9]*', message_id)
-                or not isinstance(text, str) or not text.strip() or len(text.encode()) > 450 * 1024
-                or 'grok-cc-msg:' in text):
+                or not isinstance(message_id, str) or not re.fullmatch(r'main|export-[1-9][0-9]*', message_id)):
             raise Blocked('invalid_input', 'Need valid message identity and bounded text without reserved markers')
+        try:
+            validate_prompt_transport(text)
+        except ValueError:
+            raise Blocked('invalid_input', 'Need bounded UTF-8 text without NUL or reserved markers') from None
         digest = hashlib.sha256(text.encode()).hexdigest()
         snapshot = self._snapshot()
         task = snapshot['tasks'].get(task_id)
@@ -950,7 +1024,7 @@ class BindingManager:
             native = isinstance(exc, NativeFailure)
             not_sent = native and exc.kind == 'launch' and exc.started is False and not exc.receipt
             with Registry(self.state) as db:
-                row = self._unchanged(db, intent)
+                row = self._send_unchanged(db, intent)
                 message = row['tasks'][task_id]['messages'][message_id]
                 message['error'] = {'kind': exc.kind if native and exc.kind in
                     ('launch', 'timeout', 'nonzero', 'invalid_json', 'invalid_envelope', 'invalid_result') else 'unknown',
@@ -968,7 +1042,7 @@ class BindingManager:
         receipt = _receipt(result)
         accepted = self._accepted(snapshot, receipt)
         with Registry(self.state) as db:
-            row = self._unchanged(db, intent)
+            row = self._send_unchanged(db, intent)
             message = row['tasks'][task_id]['messages'][message_id]
             message['receipt'] = receipt
             if accepted:
@@ -1083,7 +1157,7 @@ def main():
     try:
         parser = SafeParser(description=__doc__)
         parser.add_argument('command', choices=['ensure', 'create', 'send', 'finish', 'identity', 'reconcile', 'rebind'])
-        parser.add_argument('--controller', choices=['codex', 'claudex'], required=True)
+        parser.add_argument('--controller', choices=list(CONTROLLERS))
         parser.add_argument('--session-id')
         parser.add_argument('--project-root')
         parser.add_argument('--environment', default='Grok Bot')
@@ -1133,7 +1207,7 @@ def main():
                     if not args.text_file:
                         raise Blocked('invalid_input', 'Need reviewed prompt text-file')
                     result = manager.send(args.task_id, args.message_id or 'main',
-                                          Path(args.text_file).read_text(encoding='utf-8'))
+                                          Path(args.text_file).read_bytes().decode('utf-8'))
                 elif args.command == 'reconcile':
                     result = manager.reconcile(args.task_id, args.message_id)
                 else:

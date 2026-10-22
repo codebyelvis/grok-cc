@@ -2,6 +2,15 @@
 
 作者：elvis。
 
+## 0.1.0.dev6 — 2026-10-22
+
+- 修复send与reconcile交错时只读evidence变化导致有效回执丢失；仅合并观察字段，真实intent/身份漂移仍阻断，不新增派发。
+- CLI发送保留已审查prompt的CR/CRLF原字节；prepare/render/send共用450KiB传输上限、NUL及保留标记校验，默认预算仍为120KiB。
+- 本地CLI使用自有进程组，超时和读取失败后的管道/子进程回收有界；不把本地退出视作远端未送达。
+- 将安装版已有Grok controller、原生身份检查与父输出路径realpath兼容纳入源码和回归；Grok禁止在其他原生controller环境下换UUID使用。
+- 已知绑定直接send，ensure保留为可选诊断；生产prompt明确最小文本diff，减少新增文件/脚本补丁的元数据格式失败。
+- 发布与安装仍分别验证固定提交、八文件hash、入口和回归；不迁移registry、不更新native配置，真实云端业务验收单独取证。
+
 ## 0.1.0.dev5 — 2026-10-20
 
 - 新预约用公开terminal create及完整命令`claude --permission-mode auto`，仅对新实例设置auto；不改Orca全局agentDefaultArgs或已有终端。

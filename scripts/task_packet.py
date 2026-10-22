@@ -16,10 +16,13 @@ import uuid
 MAX_FILE = 128 * 1024
 MAX_TOTAL = 400 * 1024
 MAX_PROMPT = 120 * 1024
+MAX_SEND_BYTES = 450 * 1024
 SECRET = re.compile(r'AKIA[A-Z0-9]{16}|ghp_[A-Za-z0-9]{30,}|github_pat_[A-Za-z0-9_]{20,}'
                     r'|sk-[A-Za-z0-9_-]{20,}|xox[abp]-[A-Za-z0-9-]{10,}|tskey-[A-Za-z0-9_-]{10,}'
                     r'|-----BEGIN [A-Z ]*PRIVATE KEY-----')
 RESPONSE_RULES = '''Only analyze the supplied Mac snapshot; do not read or modify the cloud project, install, or run cloud project tests.
+Use only minimal unified diff: --- a/path (or --- /dev/null for a new file), +++ b/path, and @@ hunks.
+Do not include diff --git, index, or mode metadata; change only allowlisted UTF-8 text files.
 Outside the patch block, give at most 10 lines of conclusions; do not repeat the task or paste full logs.
 Existing logs: report only paths and pass/fail counts, explicitly not Mac acceptance; do not run tests to create logs.
 Create the suggested diff only as a temporary artifact and use tools to calculate its SHA256 and LF byte count.
@@ -174,6 +177,18 @@ def prompt_metrics(text):
             'token_estimate_basis': 'rough UTF-8 bytes/4, not an exact tokenizer'}
 
 
+def validate_prompt_transport(text):
+    if not isinstance(text, str) or not text.strip():
+        raise ValueError('Prompt must be nonempty UTF-8 text')
+    if '\0' in text:
+        raise ValueError('Prompt contains NUL; remove it before export')
+    if 'grok-cc-msg:' in text:
+        raise ValueError('Prompt contains a reserved message marker; remove it before export')
+    size = len(text.encode('utf-8'))
+    if size > MAX_SEND_BYTES:
+        raise ValueError(f'Prompt transport limit exceeded: {size} > {MAX_SEND_BYTES} bytes; reduce the file allowlist or task')
+
+
 def render(manifest, max_bytes=MAX_PROMPT):
     validate_packet(manifest)
     if type(max_bytes) is not int or max_bytes <= 0:
@@ -183,6 +198,7 @@ def render(manifest, max_bytes=MAX_PROMPT):
     for name, before in manifest['files'].items():
         parts.append('File: ' + name + '\n' + (before['content'] if before['content'] is not None else '(new file, absent)'))
     text = '\n\n'.join(parts) + '\n'
+    validate_prompt_transport(text)
     size = len(text.encode('utf-8'))
     if size > max_bytes:
         raise ValueError(f'Prompt budget exceeded: {size} > {max_bytes} bytes; reduce the file allowlist, not the whole repository')
@@ -416,10 +432,12 @@ def write_external_output(path, text, root):
         raise ValueError('Output must be outside the project')
     if path.is_symlink() or path.exists():
         raise ValueError('Refuse to overwrite existing output')
-    for parent in path.parents:
-        if parent.is_symlink():
-            raise ValueError('Output parent is a symlink')
-    parent = path.parent.resolve(strict=True)
+    # Resolve parent aliases (e.g. macOS /tmp) once, then pin the resolved directories
+    # with O_NOFOLLOW. A later symlink swap cannot redirect the exclusive leaf write.
+    parent = Path(os.path.realpath(path.parent, strict=True))
+    path = parent / path.name
+    if path.is_symlink() or path.exists():
+        raise ValueError('Refuse to overwrite existing output')
     if parent.is_relative_to(Path(root).resolve()):
         raise ValueError('Output parent resolves inside project')
     directory_fd = open_directory(parent)

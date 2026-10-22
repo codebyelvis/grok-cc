@@ -5,11 +5,10 @@
 
 ## 调用与证据
 
-先按版本匹配的官方orca-cli发现环境/worktree。每条helper命令使用相同`--controller`、`--session-id`、`--project-root`、`--environment`、`--worktree`、`--orca`。worktree必须是完整repoId::path，可带id:前缀。Codex读取真实CODEX_THREAD_ID；Claudex传入入口原生渲染的ID，不用未导出的shell变量或随机值替代。[官方替换说明](https://code.claude.com/docs/en/skills#available-string-substitutions)。
+先按版本匹配的官方orca-cli发现环境/worktree。每条helper命令使用相同`--controller`、`--session-id`、`--project-root`、`--environment`、`--worktree`、`--orca`。worktree必须是完整repoId::path，可带id:前缀。Codex读取真实CODEX_THREAD_ID；Claudex传入入口原生渲染的ID，不用未导出的shell变量或随机值替代。Grok CLI固定用`--controller grok --session-id <真实UUID>`，不读取或猜测环境变量；若存在Codex/Claudex原生环境则拒绝选择Grok。claudex须与存在的CLAUDE_SESSION_ID一致，仅有Codex环境时拒绝；ID等于其他controller原生环境变量时拒绝。省略controller只在恰有一个已知原生环境变量时推断，否则要求显式选择真实宿主。旧codex/claudex绑定键不变，不进行会话映射。[官方替换说明](https://code.claude.com/docs/en/skills#available-string-substitutions)。
 
 ```text
 python3 <skill-dir>/scripts/session_binding.py identity --controller codex
-python3 <skill-dir>/scripts/session_binding.py ensure <相同会话与目标参数>
 python3 <skill-dir>/scripts/session_binding.py send <相同参数> --task-id <task_id> --text-file <项目外已审查prompt>
 python3 <skill-dir>/scripts/session_binding.py reconcile <相同参数> --task-id <task_id> [--message-id main]
 python3 <skill-dir>/scripts/session_binding.py finish <相同参数> --task-id <task_id>
@@ -17,7 +16,9 @@ python3 <skill-dir>/scripts/session_binding.py finish <相同参数> --task-id <
 
 正常运行持续复用默认共享状态目录`~/.local/state/grok-cc`，不能另建state-dir绕过约束；开发回归仅用临时`--state-dir`及Orca替身，不操作真实共享目录。状态是本helper的私有数据，不是Claude/Codex原生配置，不同步远端。只保留绑定/任务摘要、cursor、意图、尝试次数和白名单回执，不保存源码prompt、屏幕正文或原始诊断。
 
-`ensure`仅核验已有绑定，不创建；无绑定时不落盘，要求先展示目标并取得用户对换绑/新建的明确选择。它不证明CC就绪或模型完成。send再次验证runtime/incarnation/worktree/agent、auto mode、真实空composer和空闲。首任务前仅允许已核实的精确空启动提示，其他草稿/未知屏幕继续保留并阻止发送。
+已知绑定和精确目标时直接send；不需要先ensure，正常路径少一次重复list。可选`ensure <相同参数>`仅诊断已有绑定，不创建；无绑定时不落盘，要求先展示目标并取得用户对换绑/新建的明确选择。它不证明CC就绪或模型完成。send自身验证runtime/incarnation/worktree/agent、auto mode、真实空composer和空闲。首任务前仅允许已核实的精确空启动提示，其他草稿/未知屏幕继续保留并阻止发送。
+
+send按原字节解码已审查UTF-8 prompt，不转换CR/CRLF。prepare/render与send共用450KiB传输上限、NUL和保留串检查；预算override不能放宽传输边界。保留串出现在普通源码中同样拒绝，需本地处理相关内容，不能编码绕过。
 
 ## 显式创建与本地最多一次提交
 
@@ -70,6 +71,8 @@ BLOCKED可返回diagnostic（本地枚举kind、started、有限returncode/timeo
 
 `reconcile`只向既有绑定查询保存cursor后的输出，可写本地证据状态，绝不send/create。marker回显、终端空闲或没有新输入不能证明accepted/not_sent；source=screen、limited/truncated或身份不符不能解锁。已有同身份有效白名单receipt证明输入受理时才可恢复accepted；证据不足保持原状态并说明原因。
 
+发送回执返回时，允许并发reconcile更新既有消息的evidence，保留这些观察后保存回执；其他绑定/任务/消息字段必须仍与持久intent一致。观察本身不证明受理，也不允许覆盖新的attempt、内容、次数或身份。
+
 本开发版本未取得官方原生request retry的精确契约；`send --retry-request`在任何Orca调用之前返回`unsupported_contract`，即使已有requestId也不猜命令。此能力尚未实现，不通过手工terminal send绕过。
 
 `finish`要求当前task无未知发送且原CC空闲，保留绑定及任务历史，返回project_pass=false；它只是释放派活占用，不是项目验收或清理。creating/unknown不能finish、重建、reset或delete。
@@ -77,6 +80,8 @@ BLOCKED可返回diagnostic（本地枚举kind、started、有限returncode/timeo
 ## 只读退避
 
 status/list/read/wait仅对限定瞬时错误按2、5、15、30秒（之后封顶30）退避；默认`--retry-budget-s 300`。正预算由一次helper命令整条只读链共享，不在verify/idle内部刷新；每次调用timeout不超过剩余预算。0关闭自动重试，各必要查询仍仅调一次且有有限timeout。read_attempts与模型提交attempts分开，不把只读轮询混为模型工作量。
+
+原生CLI在独立的本地进程session中运行；超时或读取失败只终止该次自有进程组，并使用有限的管道/子进程回收窗口。该本地清理不证明远端任务停止或未受理，仍保留unknown，不能据此重发。
 
 只读查询和sleep不持registry锁；重新加锁后重载并核对相关owner/目标/task/intent，漂移停止，不能用旧整库覆盖其他owner更新。send/首次launch/显式重放分别先在锁内原子记录意图，再单次调用；send的子进程timeout为wait-submit +45秒（当前60秒）。预算到期仅报告，不切身份、开终端或重启网络。
 

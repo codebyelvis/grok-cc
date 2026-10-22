@@ -36,11 +36,17 @@
 
 远端等待不持 registry 锁；回来后重载同 owner 意图并合并其他 owner。晚回执不能覆盖变更后的意图，也不能用旧整库快照抹掉他人的更新。
 
+send等待回执时，reconcile可能同时更新同任务的main/export，或旧任务的观察。仅既有消息的evidence不属于提交意图：容忍并保留其变化，再把回执写入最新行。其他字段仍须完全一致；不能因观察更新丢弃有效回执，也不能借合并观察放行新task/message、attempt、内容、次数、receipt或身份漂移。
+
+原生CLI每次使用自有session/进程组，超时和读取异常只回收该组；communicate和wait均有界。只kill直接子进程仍可能被继承管道的后代拖住；即使后代逃离进程组，helper也不能无限等待EOF。清理失败、非法UTF-8或本地进程退出均不证明远端未执行，unknown仍不重发。
+
 ## 产物字节和证据边界
 
 补丁只按 LF 识别结构，CR/CRLF 和其他 Unicode 分隔符保留原字节。PATCH_SHA256/PATCH_LINES 校验对象是原始 diff；损坏 hashed 产物不能用 allow-unhashed 降级，回显样板也不能遮掉损坏候选。之后仍须原 packet 的白名单、全部基线、路径和真实 Git 检查，云端声称通过不能替代 Mac 验收。
 
 prepare/render 共用最终 UTF-8 prompt 预算，媒体扩展名 override 不放行二进制或已识别编码媒体。秘密扫描是辅助防线；不得外发凭据、原生配置、历史或其他项目材料。
+
+原字节边界从prompt读取即开始：send不能用universal-newline读取把CR/CRLF变成LF；下游补丁hash正确不能补救上游快照已被改写。prepare/render/send共享450KiB、NUL和保留marker门禁，预算override不得超过传输上限。生产提示明确最小---/+++/@@格式，不靠放宽parser接受Git权限元数据。父输出路径可规范化解析别名，但解析后项目边界、逐组件O_NOFOLLOW和独占leaf写入仍须保持。
 
 ## 不把不同层的状态混成一个“已更新”
 
@@ -85,6 +91,10 @@ PY
 
 | 不变量/错误反例 | 已有确定性回归 |
 | --- | --- |
+| evidence与提交意图区分；main/export观察可合并，其他字段漂移拒绝 | test_reconcile_during_send_preserves_accepted_main_receipt；test_reconcile_during_send_preserves_main_and_export_evidence；test_reconcile_during_send_preserves_uncertain_error_and_receipt；test_late_receipt_rejects_every_non_evidence_intent_change |
+| 自有组回收、逃组持管道及读取失败有界；unknown不重派 | test_native_timeout_kills_only_owned_process_group；test_native_timeout_is_bounded_when_descendant_escapes_with_pipes；test_native_read_failure_is_bounded_when_descendant_escapes_with_pipes；test_native_invalid_utf8_returns_structured_failure_after_cleanup；test_native_cleanup_timeout_retains_sending_intent_without_resubmit |
+| 真实CLI保留prompt CR/CRLF；传输门禁提前拒绝且零输出 | test_prepare_render_send_cli_preserves_crlf_and_bare_cr_bytes；test_prepare_and_render_reject_unsupported_transport_without_output；test_transport_boundary_counts_utf8_bytes_before_render_output；test_send_transport_rejection_preserves_state_before_native_calls |
+| Grok不借外来宿主换UUID；父路径别名不突破项目边界或覆盖输出 | test_grok_rejects_foreign_native_env_even_with_unrelated_uuid；test_output_parent_symlink_like_macos_tmp_is_resolved；test_output_never_writes_project_during_parent_symlink_swap |
 | 新预约准确的每实例auto命令与零落盘预览；失败后不重创/重放 | AutoLaunchTests；test_explicit_create_cli_dispatch_and_confirmation_boundary；test_parallel_processes_create_and_submit_at_most_once |
 | 精确八提示仅限首次；显式draft、相似文本、非auto或身份漂移均阻断 | test_claude_2_1_303_static_placeholders_bind_new_create_once；test_typed_try_text_reported_as_native_draft_is_never_a_placeholder；test_placeholder_lookalikes_and_drifted_or_non_auto_candidates_stay_pending |
 | 预约同步失败零调用；未启动、丢回执、旧 creating 不重提 | test_explicit_reservation_sync_failure_prevents_native_create；test_explicit_failed_native_launch_is_not_resubmitted；test_explicit_lost_receipt_does_not_infer_owner_or_recreate；test_explicit_legacy_creating_blocks_every_mutating_entry_point |

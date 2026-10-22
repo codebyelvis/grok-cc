@@ -78,6 +78,8 @@ class PacketTests(unittest.TestCase):
         reply=self.wrap(diff, manifest['task_id'])
         self.assertEqual(packet.check(manifest,reply),diff)
         self.assertFalse((self.root/'new.py').exists())
+        subprocess.run(['git','apply','--'],input=diff.encode('utf-8'),cwd=self.root,check=True)
+        self.assertEqual((self.root/'new.py').read_bytes(),b'value = 2\n')
         (self.root/'new.py').write_text('user work\n')
         with self.assertRaises(ValueError):packet.check(manifest,reply)
     def test_real_git_rejects_context_mismatch(self):
@@ -150,6 +152,17 @@ class PacketTests(unittest.TestCase):
                     except (ValueError,OSError):pass
                 self.assertEqual(list(self.root.glob('result*.txt')),[])
             finally:stop.set();worker.join()
+    def test_output_parent_symlink_like_macos_tmp_is_resolved(self):
+        with tempfile.TemporaryDirectory() as other:
+            real=Path(other).resolve()/'private'/'tmp';real.mkdir(parents=True)
+            link=Path(other)/'tmp';link.symlink_to(real)
+            packet.write_external_output(link/'out.txt','data',self.root)
+            self.assertEqual((real/'out.txt').read_text(),'data')
+            self.assertFalse((real/'out.txt').is_symlink())
+            with self.assertRaises(ValueError):packet.write_external_output(link/'out.txt','x',self.root)
+            inside=Path(other)/'into_project';inside.symlink_to(self.root)
+            with self.assertRaises(ValueError):packet.write_external_output(inside/'leak.txt','x',self.root)
+            self.assertFalse((self.root/'leak.txt').exists())
     def test_normal_git_can_apply_checked_output(self):
         patch=packet.check(self.manifest,self.wrap())
         subprocess.run(['git','apply','--'],input=patch,text=True,cwd=self.root,check=True)
@@ -313,6 +326,47 @@ class PacketTests(unittest.TestCase):
             self.assertEqual(metrics['token_estimate'],(metrics['prompt_bytes']+3)//4)
             self.assertEqual(metrics['packet_bytes'],len(out.read_bytes()))
             self.assertIn('at most 10 lines',prompt);self.assertIn('do not repeat the task',prompt)
+    def test_prepare_and_render_reject_unsupported_transport_without_output(self):
+        with tempfile.TemporaryDirectory() as external:
+            external=Path(external).resolve()
+            for label,task,content in (
+                    ('marker','task','marker = "grok-cc-msg:"\n'),
+                    ('nul-task','task\0private-content','value = 1\n'),
+                    ('oversized','x'*65000,'y'*100000)):
+                with self.subTest(case=label):
+                    names=['a.py'] if label!='oversized' else ['a.py','b.py','c.py','d.py']
+                    for name in names:(self.root/name).write_text(content,encoding='utf-8')
+                    manifest=json.loads(json.dumps(self.manifest));manifest['task']=task
+                    manifest['files']={name:{'content':content,'sha256':hashlib.sha256(content.encode()).hexdigest()}
+                                       for name in names}
+                    with self.assertRaises(ValueError) as caught:
+                        packet.prepare(self.root,names,task,max_bytes=500000)
+                    self.assertNotIn(content,str(caught.exception))
+                    self.assertNotIn(task,str(caught.exception))
+                    packet_path=external/(label+'.json');packet_path.write_text(json.dumps(manifest))
+                    output=external/(label+'.txt')
+                    result=subprocess.run([sys.executable,str(SOURCE),'render','--packet',str(packet_path),
+                                           '--out',str(output),'--max-bytes','500000'],capture_output=True)
+                    self.assertNotEqual(result.returncode,0)
+                    self.assertFalse(output.exists())
+                    self.assertNotIn(content,result.stderr.decode());self.assertNotIn(task,result.stderr.decode())
+                    if label!='nul-task':
+                        output=external/(label+'-prepared.json')
+                        args=[sys.executable,str(SOURCE),'prepare','--root',str(self.root),'--task',task,
+                              '--out',str(output),'--max-bytes','500000']
+                        for name in names:args.extend(['--file',name])
+                        result=subprocess.run(args,capture_output=True)
+                        self.assertNotEqual(result.returncode,0)
+                        self.assertFalse(output.exists())
+    def test_transport_boundary_counts_utf8_bytes_before_render_output(self):
+        manifest=json.loads(json.dumps(self.manifest))
+        manifest['task']='汉'
+        overhead=len(packet.render(manifest).encode('utf-8'))-3
+        remaining=450*1024-overhead
+        manifest['task']='汉'*(remaining//3)+'x'*(remaining%3)
+        self.assertEqual(len(packet.render(manifest,max_bytes=500000).encode('utf-8')),460800)
+        manifest['task']+='x'
+        with self.assertRaises(ValueError):packet.render(manifest,max_bytes=500000)
     def test_media_override_is_only_an_extension_override(self):
         (self.root/'diagram.png').write_text('safe UTF-8 text\n')
         with self.assertRaises(ValueError):packet.prepare(self.root,['diagram.png'],'task')

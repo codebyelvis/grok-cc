@@ -14,7 +14,10 @@
 补丁块外正文最多10行结论；不复述任务、不贴完整测试日志。
 仅已有合法日志报路径与通过/失败计数，并明确它不是Mac实测证据，不为此新跑项目测试。
 
-产物为标准unified diff，无Markdown围栏，保留所有空格与UTF-8原字节。
+产物为最小unified diff，无Markdown围栏，保留所有空格与UTF-8原字节。
+每个文件直接从--- a/相对路径和+++ b/相对路径开始，随后是@@及hunk。
+新增文件的旧路径为/dev/null。仅文本修改/新增，不改变文件权限。
+不输出diff --git、index、new file mode、old mode或new mode元数据。
 开头独立行由BEGIN_PATCH、一个ASCII空格、上面的任务编号拼接而成。
 其后是以LF结尾的diff；仅支持白名单文件的文本修改/新增。
 请用工具对这个diff文件的原始字节计算SHA256与LF字节数，不要猜摘要或行数。

@@ -1,6 +1,6 @@
 ---
 name: grok-cc
-description: "Delegate work on a local Mac project to Claude Code on the Grok Bot cloud computer through Orca, then review and test its patch locally. Use when the user asks Codex or Claudex to call cloud CC for local development."
+description: "Use when the user asks Codex, Claudex, or Grok CLI to delegate a concrete local Mac development task to Claude Code on the Grok Bot cloud computer."
 ---
 
 # Mac 项目 → Grok Bot Claude Code
@@ -13,18 +13,18 @@ Mac源码是真值，云端`hello`不会看到Mac文件。Codex/现有Claudex负
 
 先读适用规则、源码和用户改动，确定一个task_id、最少白名单及Mac验收条件；首轮先小，跑通check/apply/本地测试后再扩大。缺真实任务只查状态，不发送占位符。
 
-packet/reply/checked.patch/prompt始终放项目外私有目录，不覆盖既有文件。packet含Mac来源和基线，只留本地，不能用云端内容替代；外发只用render结果并人工审查。
+packet/reply/checked.patch/prompt始终放项目外私有目录，不覆盖既有文件。允许/tmp等父目录别名，解析后仍须在项目外。packet含Mac来源和基线，只留本地，不能用云端内容替代；外发只用render结果并人工审查，发送保留其UTF-8原字节及CR/CRLF。
 
 ```text
 python3 <skill-dir>/scripts/task_packet.py prepare --root <Mac根目录> --file src/labels.py --task '具体需求与Mac验收条件' --out <项目外>/packet.json
 python3 <skill-dir>/scripts/task_packet.py render --packet <原packet.json> --out <项目外>/prompt.txt
 ```
 
-prepare/render共用最终prompt默认120KiB预算，报告字节及粗略token估算；超限先缩小白名单，不打包整仓。明确审查后可用`--max-bytes`调阈值，但文件/总量/安全限制仍有效。助手扫描常见secret并仅报安全位置，不保证识别所有秘密：**不发送凭据、native配置、会话、历史、日志、hooks、密钥或完整依赖目录**，不同步Mac/云端登录。
+prepare/render共用最终prompt默认120KiB预算，报告字节及粗略token估算；超限先缩小白名单，不打包整仓。明确审查后可用`--max-bytes`调阈值，但450KiB传输上限及文件/总量/安全限制仍有效。prepare/render和send均拒绝NUL及保留串`grok-cc-msg:`，包括源码中的同名字面量；遇到此限制在本地处理该文件，不编码绕过。助手扫描常见secret并仅报安全位置，不保证识别所有秘密：**不发送凭据、native配置、会话、历史、日志、hooks、密钥或完整依赖目录**，不同步Mac/云端登录。
 
 截图、视频、扫描件不进入CC对话，先用已有合法本地/云端CLI得到必要文字摘要，再作为任务说明。prepare默认拒绝媒体扩展名；`--allow-binary`只放宽扩展名，绝不允许真实二进制、NUL、非UTF-8或已识别编码媒体，不自动转码/编码。
 
-生产prompt要求：补丁块外最多10行结论，不复述任务、不贴完整日志；已有日志只报路径/计数并标非Mac验收，不诱导云端项目测试。统一模板、临时diff工具计算及hash协议见[最终补丁请求](references/final-patch-prompt.md)：开头/结束分别由BEGIN_PATCH或END_PATCH、空格、单独给定的task_id拼接，不在prompt中展开带真实ID的完整标记行。diff后、结束前必须有PATCH_SHA256及PATCH_LINES，计算对象仅原始diff字节及LF数，不含元数据。
+生产prompt要求：补丁块外最多10行结论，不复述任务、不贴完整日志；已有日志只报路径/计数并标非Mac验收，不诱导云端项目测试。补丁采用`---/+++/@@`最小unified diff，新文件旧路径为`/dev/null`；不输出`diff --git`、index或mode元数据。统一模板、临时diff工具计算及hash协议见[最终补丁请求](references/final-patch-prompt.md)：开头/结束分别由BEGIN_PATCH或END_PATCH、空格、单独给定的task_id拼接，不在prompt中展开带真实ID的完整标记行。diff后、结束前必须有PATCH_SHA256及PATCH_LINES，计算对象仅原始diff字节及LF数，不含元数据。
 
 ## 2. 固定会话后一次提交
 
@@ -39,13 +39,14 @@ orca terminal list --environment 'Grok Bot' --json
 
 - Codex使用当前CODEX_THREAD_ID，helper可读取；不能以外部UUID覆盖。
 - Claudex本次原生渲染ID为`${CLAUDE_SESSION_ID}`，须作为`--session-id`传入。它不是shell环境变量；未取到真实ID或仍是占位符即停止，不用PID/目录/随机值替代。
+- Grok CLI使用`--controller grok --session-id <真实Grok CLI会话UUID>`显式传入；不猜测Grok环境变量。环境有CODEX_THREAD_ID或CLAUDE_SESSION_ID时不能选择grok，换一个UUID也不行。
+- claudex在存在CLAUDE_SESSION_ID时须一致，仅有Codex环境时拒绝。三个controller不跨映射会话ID，旧绑定键保持。省略controller仅在恰有一个已知原生环境变量时推断；零个或两个均须明确选择真实宿主，不能改身份解锁。
 
 ```text
-python3 <skill-dir>/scripts/session_binding.py ensure --controller <codex或claudex> --session-id <真实ID> --project-root <Mac根目录> --environment 'Grok Bot' --worktree <已发现完整云端worktreeID> --orca <本次选定可执行文件>
-python3 <skill-dir>/scripts/session_binding.py send <同一组会话与目标参数> --task-id <当前ID> --text-file <项目外已审查prompt.txt>
+python3 <skill-dir>/scripts/session_binding.py send --controller <codex|claudex|grok> --session-id <真实ID> --project-root <Mac根目录> --environment 'Grok Bot' --worktree <已发现完整云端worktreeID> --orca <本次选定可执行文件> --task-id <当前ID> --text-file <项目外已审查prompt.txt>
 ```
 
-已有绑定才使用上面的ensure→send；ensure仅核验，不创建。无绑定或旧实例确实消失时，先用以下无confirm命令展示同项目目标及claude/auto/位置计划，等待用户明确选择换绑或新建；有现成任务也不能跳过选择：
+已知精确绑定及同一目标参数时直接send；它自带身份、空闲、auto和草稿核验，无需先ensure。ensure保留为可选只读诊断，不创建。无绑定或旧实例确实消失时，先用以下无confirm命令展示同项目目标及claude/auto/位置计划，等待用户明确选择换绑或新建；有现成任务也不能跳过选择：
 
 ```text
 python3 <skill-dir>/scripts/session_binding.py create <同一组会话与目标参数> --project <已发现完整云端worktreeID>

@@ -2,7 +2,7 @@
 
 [简体中文](README.md) | [English](README.en.md)
 
-Author: elvis. Version: `0.1.0.dev3`, a development version with no formal release yet.
+Author: elvis. Version: `0.1.0.dev6`, a development version with no formal release yet.
 
 Delegate local Mac development tasks to Claude Code on the Grok Bot cloud computer through Orca. Recover the patch, then check, review, apply and test it on the Mac.
 
@@ -14,7 +14,7 @@ The Mac project is the source of truth. A cloud terminal directory is not the Ma
 
 ## Prerequisites
 
-- Codex or an existing Claudex setup on the Mac. This project does not require a new local Claude login.
+- Codex, an existing Claudex setup, or Grok CLI on the Mac. This project does not require a new local Claude login.
 - Claude Code already signed in on the cloud computer, with a paired and reachable Orca runtime.
 - The Orca CLI for the selected environment. Load its version-matched `orca-cli` guide before using commands.
 - Python 3.11 or later and Git; Make for development checks. Helpers use only the Python standard library and rely on POSIX locks and directory file descriptors. The target platforms are macOS and Linux, not native Windows Python.
@@ -28,11 +28,13 @@ After installation into the appropriate Skill entry, invoke it from your actual 
 ```text
 Codex:   $grok-cc Fix a specific issue in the current project and verify it on the Mac
 Claudex: /grok-cc Fix a specific issue in the current project and verify it on the Mac
+Grok CLI: Use grok-cc to fix a specific issue in the current project and verify it on the Mac
 ```
 
 Provide the actual task, allowed files and acceptance criteria. The controller follows [SKILL.md](SKILL.md); example placeholders are not dispatchable tasks. The current Skill instructions and detailed references are in Chinese.
 
 - One real Mac conversation owns one cloud CC terminal. Different conversations do not share terminals.
+- With a known binding and exact destination, call `send` directly; it performs all required checks. `ensure` is optional diagnosis. Grok CLI requires an explicit real session ID and cannot be selected under a Codex or Claudex native environment.
 - Terminal creation requires an explicit user choice. `ensure` verifies an existing binding. Without a binding, first show the read-only plan with `create --project <full cloud worktree ID>`; add `--confirm` only after the user chooses that target. A durable local reservation allows at most one submission per intent in the same registry. There is no native caller-key deduplication, and unknown outcomes never trigger another create.
 - Busy, offline, changed identity or unknown send outcomes preserve the existing binding. Do not switch terminals or resend blindly.
 - Repeating accepted/uncertain task/message/text resumes its record. Only positively not-started sends allow an explicit same-text retry; a task has at most two submissions including legitimate format exports. Changing IDs cannot bypass this.
@@ -40,7 +42,7 @@ Provide the actual task, allowed files and acceptance criteria. The controller f
 - Require complete task framing, PATCH_SHA256/PATCH_LINES matching original bytes and the original packet's file/baseline/path checks. Legacy output requires explicit `--allow-unhashed`. `input_accepted`, `tui-idle` and screenshots are not acceptance evidence.
 - `finish` releases the task slot while preserving its binding. It returns `project_pass=false` and does not establish project completion.
 
-Prepare/render share a default 120 KiB outbound budget and credential scanning; start with a minimal allowlist. Render omits the Mac root and baseline hashes and requests at most ten conclusion lines outside the patch. Optional handoff-summary reports only supplied evidence; missing evidence stays unverified and the helper never writes remotely.
+Prepare/render share a default 120 KiB outbound budget and credential scanning; start with a minimal allowlist. An explicit budget override still respects the 450 KiB transport ceiling. NUL and the reserved message marker fail during preparation. Render omits the Mac root and baseline hashes; send preserves CR/CRLF bytes. The prompt requests at most ten conclusion lines and a minimal text diff without Git metadata. Output parent aliases such as /tmp are supported when their canonical location remains outside the project. Optional handoff-summary reports only supplied evidence; missing evidence stays unverified and the helper never writes remotely.
 
 Details: [session binding](references/session-binding.md), [final patch requests and blocker classification](references/final-patch-prompt.md).
 
