@@ -4,6 +4,8 @@
 
 本页归纳已批准、已实现的不变量及其回归入口，不新增运行权限。调用规则以 [Skill](../../SKILL.md)、[会话绑定](../../references/session-binding.md) 和现行 OpenSpec 为准；本轮状态见[会话归档](../handoffs/2026-10-19-local-closeout.md)，决策原因见 [ADR 0001](../adr/0001-local-at-most-once-create.md)。
 
+2026-10-22调用可靠性修复、dev6发布及安装验收见[本次归档](../../openspec/changes/archive/2026-10-22-improve-invocation-reliability/tasks.md)；它不替代真实云端业务证据。
+
 ## 创建与发送分开计数
 
 本地每个创建意图只提交一次新启动，只约束同一保留 registry、真实 owner 和目的地。Orca≥1.4.229新协议只在已保存原生operationId及unknown/retrySafe证据时，允许原host/context显式重放同ID一次；重放先持久消耗额度，不转为新启动。不承诺跨客户端、跨registry或exactly-once。持久预约之后即使子进程没有启动，也允许永远保持未知；旧无ID pending不能升级成重放权限。不得删除或切换状态目录来恢复“重试机会”。

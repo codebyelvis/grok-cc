@@ -45,3 +45,11 @@ review_result: pass
 decision_owner: codex
 decision_provenance: 主控采纳独立Learning Review PASS，提升至项目内不变量与回归；不提升为全局Skill规则。
 ```
+
+## Release And Installation Evidence
+
+- 发布来源：63ea82cedaa8c1462846945b536536f897e091d6（0.1.0.dev6）；远端master核对一致，CI 39763619836四组全部通过。
+- 源码、固定提交staging与active八文件hash一致；manifest SHA256为8452722388c7843ec53678f7b643233e7368d01206138c83887f6fdd1c5bcae7。
+- 源码/主分支/staging/active各自运行161项回归通过；独立Final与安装审核均PASS，安装审核另验证两个实际入口help/identity/无绑定ensure不触发原生调用。
+- 更新前保存完整载荷前像与权限/入口清单，复制前拒绝漂移；rsync仅清单八文件，无delete。安装后11个非载荷entry、两入口链接、权限及归属不变，前像保留于Skill发现目录之外。
+- 不访问真实共享registry、不修改native配置、不调度真实云端任务。本次证明本地调用实现与安装闭环，不证明云端业务端到端通过或旧窗口自动重载。
