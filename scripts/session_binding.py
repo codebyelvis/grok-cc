@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """Author: elvis. Durable one-conversation/one-Orca-CC ownership and send guards."""
 import argparse
+import base64
 import copy
 import fcntl
 import functools
@@ -18,7 +19,7 @@ import sys
 import time
 import uuid
 
-from task_packet import validate_prompt_transport
+from task_packet import validate_prompt_transport, open_directory
 
 
 class Blocked(ValueError):
@@ -1146,6 +1147,286 @@ class BindingManager:
             return self._view(row)
 
 
+# Read-only recovery deliberately lives outside BindingManager: no registry locks or Orca calls.
+RECOVER_REMOTE = r'''
+import json, os, pathlib, subprocess, sys, uuid
+root = pathlib.Path.home() / '.claude/projects'
+search = subprocess.run(['rg', '-l', '--null', '--fixed-strings', '--glob', '*.jsonl', '--', sys.argv[1], str(root)], capture_output=True)
+if search.returncode not in (0, 1):
+    sys.exit(2)
+result = []
+for rawpath in search.stdout.split(b'\0'):
+    if not rawpath: continue
+    path = pathlib.Path(os.fsdecode(rawpath))
+    try:
+        if str(uuid.UUID(path.stem)) != path.stem: continue
+    except ValueError:
+        continue
+    if 'subagents' in path.relative_to(root).parts: continue
+    if path.is_symlink() or not path.resolve().is_relative_to(root.resolve()): sys.exit(3)
+    before = path.stat()
+    if before.st_size > 64 * 1024 * 1024: sys.exit(3)
+    records = []
+    with path.open(encoding='utf-8') as stream:
+        for line in stream:
+            item = json.loads(line)
+            if item.get('type') not in ('user', 'assistant'): continue
+            msg = item.get('message', {})
+            content = msg.get('content', [])
+            if isinstance(content, list):
+                content = [({'type': 'text', 'text': b.get('text')} if b.get('type') == 'text'
+                            else {'type': 'tool_result'}) for b in content
+                           if b.get('type') in ('text', 'tool_result')]
+            records.append({**{k: item[k] for k in ('type', 'uuid', 'parentUuid', 'promptId', 'sessionId', 'isSidechain') if k in item},
+                'message': {'content': content, 'stop_reason': msg.get('stop_reason')}})
+    after = path.stat()
+    if (before.st_ino, before.st_size, before.st_mtime_ns) != (after.st_ino, after.st_size, after.st_mtime_ns): sys.exit(3)
+    env = pathlib.Path.home() / '.claude/session-env' / path.stem
+    result.append({'path': str(path), 'sessionId': path.stem, 'mtime': after.st_mtime,
+                   'session_env_mtime': env.stat().st_mtime if env.exists() else None, 'records': records})
+print(json.dumps(result, ensure_ascii=False))
+'''
+
+
+def read_final_candidates(host, user, task_id, expected_host_fp=None):
+    """Strict known_hosts remains authoritative even when a fingerprint is supplied."""
+    if (not isinstance(host, str) or not re.fullmatch(r'[A-Za-z0-9][A-Za-z0-9.-]{0,252}', host)
+            or not isinstance(user, str) or not re.fullmatch(r'[A-Za-z_][A-Za-z0-9_-]{0,63}', user)
+            or _uuid_or_none(task_id) != task_id):
+        raise Blocked('invalid_input', 'Invalid SSH destination or task UUID')
+    if expected_host_fp is not None and not re.fullmatch(r'SHA256:[A-Za-z0-9+/]{43}', expected_host_fp):
+        raise Blocked('invalid_input', 'Expected host fingerprint must be SHA256')
+    try:
+        if expected_host_fp:
+            scan = subprocess.run(['ssh-keyscan', '-T', '10', '-t', 'ed25519', host],
+                                  capture_output=True, timeout=15)
+            keys = {line.split()[2] for line in scan.stdout.splitlines()
+                    if len(line.split()) == 3 and line.split()[1] == b'ssh-ed25519'}
+            if scan.returncode or not keys:
+                raise Blocked('unreachable', 'Cannot read host key; known_hosts unchanged')
+            fps = {'SHA256:' + base64.b64encode(hashlib.sha256(base64.b64decode(k, validate=True)).digest()).decode().rstrip('=')
+                   for k in keys}
+            if fps != {expected_host_fp}:
+                raise Blocked('identity_changed', 'SSH host fingerprint differs; known_hosts unchanged')
+        command = ['ssh', '-v', '-T', '-o', 'BatchMode=yes', '-o', 'StrictHostKeyChecking=yes',
+                   '-o', 'UpdateHostKeys=no', '-o', 'ConnectTimeout=10',
+                   '-o', 'ControlMaster=no', '-o', 'ControlPath=none',
+                   '-o', 'HostKeyAlgorithms=ssh-ed25519', user + '@' + host,
+                   'python3 - ' + task_id]
+        response = subprocess.run(command, input=('import sys\ntry:\n' + ''.join('    ' + line + '\n' for line in RECOVER_REMOTE.splitlines())
+                                         + 'except PermissionError:\n    sys.exit(2)\n').encode(), capture_output=True, timeout=60)
+    except Blocked:
+        raise
+    except (OSError, subprocess.TimeoutExpired):
+        raise Blocked('unreachable', 'SSH unavailable; preserve host keys and binding') from None
+    except (ValueError, TypeError):
+        raise Blocked('integrity_failure', 'Invalid remote host key evidence') from None
+    if response.returncode == 255:
+        raise Blocked('unreachable', 'SSH connection/authentication/known_hosts failed; no automatic repair')
+    if expected_host_fp:
+        actual = re.findall(rb'Server host key: ssh-ed25519 (SHA256:[A-Za-z0-9+/]{43})(?:\s|$)', response.stderr)
+        if not actual or set(actual) != {expected_host_fp.encode()}:
+            raise Blocked('identity_changed', 'SSH handshake fingerprint is unverified or changed; nothing exported')
+    if response.returncode == 2:
+        raise Blocked('unreachable', 'Remote search or file permissions unavailable')
+    if response.returncode:
+        raise Blocked('integrity_failure', 'Remote JSONL unavailable, changing or malformed')
+    try:
+        value = json.loads(response.stdout)
+    except (ValueError, UnicodeError):
+        raise Blocked('integrity_failure', 'Invalid remote JSONL projection') from None
+    if not isinstance(value, list):
+        raise Blocked('integrity_failure', 'Invalid remote candidate list')
+    return value
+
+
+def _recovery_target(state, owner, task_id, message_id):
+    if _uuid_or_none(task_id) != task_id or not re.fullmatch(r'[A-Za-z0-9_-]{1,64}', message_id):
+        raise Blocked('invalid_input', 'Need canonical task UUID and message ID')
+    row = Registry.inspect(state)['bindings'].get(owner_key(owner))
+    if not row or row.get('state') != 'bound' or task_id not in row.get('tasks', {}):
+        raise Blocked('invalid_input', 'No matching bound task for this owner')
+    if any(not _safe_identity(row.get(k)) for k in ('handle', 'runtime', 'incarnation')):
+        raise Blocked('integrity_failure', 'Binding identity incomplete')
+    message = row['tasks'][task_id].get('messages', {}).get(message_id)
+    if (not isinstance(message, dict) or message.get('state') != 'accepted'
+            or not BindingManager._accepted(row, _receipt(message.get('receipt')))):
+        raise Blocked('uncertain_send', 'Recovery requires an accepted message and matching receipt')
+    if not isinstance(message.get('sha256'), str) or not re.fullmatch(r'[0-9a-f]{64}', message['sha256']):
+        raise Blocked('integrity_failure', 'Accepted message lacks its original prompt digest')
+    return row, message
+
+
+def _final_text(candidate, task_id, message_id, message, locate_only=False):
+    records = candidate.get('records')
+    if not isinstance(records, list) or not all(isinstance(r, dict) for r in records):
+        raise Blocked('integrity_failure', 'Malformed JSONL records')
+    marker = 'grok-cc-msg:' + task_id + '/' + message_id + '/' + message.get('sha256', '')[:8]
+    for record in records:
+        msg = record.get('message')
+        if not isinstance(msg, dict):
+            raise Blocked('integrity_failure', 'Invalid JSONL message')
+        content = msg.get('content')
+        if not isinstance(content, (str, list)) or (isinstance(content, list) and
+                any(not isinstance(b, dict) or (b.get('type') == 'text' and not isinstance(b.get('text'), str))
+                    for b in content)):
+            raise Blocked('integrity_failure', 'Invalid JSONL content')
+        if any(k in record and record[k] is not None and not isinstance(record[k], str)
+               for k in ('uuid', 'parentUuid', 'promptId', 'sessionId')):
+            raise Blocked('integrity_failure', 'Invalid JSONL identity')
+    starts = []
+    for i, record in enumerate(records):
+        if record.get('type') != 'user' or record.get('isSidechain') is True:
+            continue
+        content = record.get('message', {}).get('content')
+        texts = [content] if isinstance(content, str) else [b.get('text', '') for b in content or [] if b.get('type') == 'text']
+        if any(marker in t for t in texts) or (task_id in ''.join(texts)
+                and hashlib.sha256(''.join(texts).encode()).hexdigest() == message.get('sha256')):
+            starts.append(i)
+    if not starts:
+        return None
+    if locate_only: return True
+    start = starts[-1]
+    prompt_id = records[start].get('promptId')
+    finals = []
+    for record in records[start + 1:]:
+        if record.get('isSidechain') is True: continue
+        msg = record.get('message', {})
+        if record.get('type') == 'user':
+            content = msg.get('content')
+            continuation = (prompt_id is not None and record.get('promptId') == prompt_id
+                            and isinstance(content, list) and content
+                            and all(b.get('type') == 'tool_result' for b in content))
+            if not continuation: break
+        if record.get('type') == 'assistant':
+            # A later unfinished assistant invalidates a stale earlier end_turn.
+            finals.append(record)
+    if not finals or finals[-1].get('message', {}).get('stop_reason') != 'end_turn':
+        raise Blocked('integrity_failure', 'No final end_turn for the accepted message')
+    final = finals[-1]
+    nodes = {}
+    for record in records:
+        uid = record.get('uuid')
+        if uid:
+            if uid in nodes and nodes[uid] != record:
+                raise Blocked('integrity_failure', 'Conflicting duplicate JSONL UUID')
+            nodes[uid] = record
+    origin = records[start].get('uuid')
+    ancestors = set()
+    cursor = final.get('parentUuid')
+    while cursor and cursor != origin and cursor not in ancestors:
+        ancestors.add(cursor)
+        cursor = nodes.get(cursor, {}).get('parentUuid')
+    if not origin or cursor != origin:
+        raise Blocked('integrity_failure', 'Final assistant ancestry does not reach the accepted user turn')
+    if any(r.get('message', {}).get('stop_reason') == 'end_turn' and r.get('uuid') not in ancestors
+           for r in finals[:-1]):
+        raise Blocked('integrity_failure', 'Multiple final assistant branches; do not guess')
+    content = final['message'].get('content')
+    if not isinstance(content, list):
+        raise Blocked('integrity_failure', 'Final assistant content is not a block list')
+    blocks = [b.get('text') for b in content if b.get('type') == 'text']
+    if not blocks or not all(isinstance(t, str) for t in blocks) or not ''.join(blocks) or not final.get('uuid'):
+        raise Blocked('integrity_failure', 'Final assistant has no text or UUID')
+    if final.get('sessionId', candidate['sessionId']) != candidate['sessionId']:
+        raise Blocked('integrity_failure', 'Assistant session identity differs from JSONL')
+    return ''.join(blocks), final['uuid'], len(blocks)
+
+
+def _patch_evidence(body, task_id):
+    begin, end = 'BEGIN_PATCH ' + task_id, 'END_PATCH ' + task_id
+    lines = body.split('\n')
+    result = {'patch_begin_count': lines.count(begin), 'patch_end_count': lines.count(end), 'patch_sha_ok': None}
+    if 'BEGIN_PATCH' not in body and 'END_PATCH' not in body: return result
+    result['patch_sha_ok'] = False
+    if lines.count(begin) != 1 or lines.count(end) != 1: return result
+    first, last = lines.index(begin), lines.index(end)
+    if last < first + 3: return result
+    sha = re.fullmatch(r'PATCH_SHA256 ([0-9a-f]{64})', lines[last - 2])
+    count = re.fullmatch(r'PATCH_LINES (0|[1-9][0-9]*)', lines[last - 1])
+    if not sha or not count: return result
+    patch = ''.join(line + '\n' for line in lines[first + 1:last - 2]).encode('utf-8')
+    result.update(patch_sha256=sha[1], patch_lines=int(count[1]),
+                  patch_sha_ok=hashlib.sha256(patch).hexdigest() == sha[1] and patch.count(b'\n') == int(count[1]))
+    return result
+
+
+def _recovery_output(prefix, project, body, meta):
+    """Pin a non-symlink parent; exclusively create both files, rolling back only our leaves."""
+    prefix = Path(prefix).expanduser().absolute()
+    project = Path(project).resolve(strict=True)
+    if '..' in prefix.parts or prefix.resolve().is_relative_to(project):
+        raise Blocked('invalid_input', 'Recovery output must be outside the project')
+    fd = None
+    created = []
+    try:
+        fd = open_directory(prefix.parent)  # O_NOFOLLOW for every component, including /tmp.
+        for suffix in ('.txt', '.meta.json'):
+            try:
+                os.stat(prefix.name + suffix, dir_fd=fd, follow_symlinks=False)
+            except FileNotFoundError:
+                continue
+            raise Blocked('invalid_input', 'Recovery output already exists; choose a new prefix')
+        for suffix, data in (('.txt', body.encode('utf-8')),
+                             ('.meta.json', (json.dumps(meta, ensure_ascii=False, indent=2) + '\n').encode())):
+            name = prefix.name + suffix
+            leaf = os.open(name, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o600, dir_fd=fd)
+            created.append(name)
+            with os.fdopen(leaf, 'wb') as stream:
+                stream.write(data); stream.flush(); os.fsync(stream.fileno())
+        os.fsync(fd)
+    except (OSError, ValueError):
+        if fd is not None:
+            for name in created: os.unlink(name, dir_fd=fd)
+        raise Blocked('invalid_input', 'Output parent must exist without symlinks; use /private/tmp or a private directory') from None
+    finally:
+        if fd is not None: os.close(fd)
+    return str(prefix) + '.txt', str(prefix) + '.meta.json'
+
+
+def recover_final_reply(state, owner, task_id, message_id='main', ssh_host='100.84.23.115',
+                        ssh_user='box', out=None, expected_host_fp=None, remote_read=None):
+    state = Path(state).expanduser().absolute()
+    row, message = _recovery_target(state, owner, task_id, message_id)
+    candidates = (remote_read or read_final_candidates)(ssh_host, ssh_user, task_id, expected_host_fp)
+    matching = []
+    for candidate in candidates:
+        if (not isinstance(candidate, dict) or _uuid_or_none(candidate.get('sessionId')) != candidate.get('sessionId')
+                or not isinstance(candidate.get('path'), str)
+                or Path(candidate['path']).stem != candidate['sessionId']):
+            raise Blocked('integrity_failure', 'Invalid JSONL candidate identity')
+        if _final_text(candidate, task_id, message_id, message, locate_only=True):
+            matching.append((candidate, None))
+    if len(matching) > 1:
+        # Older registries have no handle creation time: never manufacture one from incarnation strings.
+        created = row.get('handle_created_at')
+        if type(created) in (int, float) and math.isfinite(created):
+            ranked = []
+            for pair in matching:
+                stamp = pair[0].get('session_env_mtime') or pair[0].get('mtime')
+                if type(stamp) in (int, float) and math.isfinite(stamp):
+                    ranked.append((abs(stamp - created), pair))
+            ranked.sort(key=lambda item: item[0])
+            if len(ranked) == len(matching) and ranked[0][0] <= 300 and ranked[1][0] > 300:
+                matching = [ranked[0][1]]
+    if len(matching) != 1:
+        raise Blocked('integrity_failure', 'No unique final JSONL; do not guess a session',
+                      diagnostic={'candidate_session_ids': [c['sessionId'] for c in candidates]})
+    candidate = matching[0][0]
+    body, assistant_uuid, block_count = _final_text(candidate, task_id, message_id, message)
+    if _recovery_target(state, owner, task_id, message_id) != (row, message):
+        raise Blocked('identity_changed', 'Binding or message changed during read; nothing exported')
+    data = body.encode('utf-8')
+    meta = {'sessionId': candidate['sessionId'], 'uuid': assistant_uuid, 'stop_reason': 'end_turn',
+            'text_block_count': block_count, 'body_sha256': hashlib.sha256(data).hexdigest(), 'body_bytes': len(data),
+            'task_id': task_id, 'message_id': message_id, 'remote_jsonl_path': candidate['path'],
+            'handle': row['handle'], 'runtime': row['runtime'], 'incarnation': row['incarnation'],
+            'inventory_checked': False, 'handle_absent_in_inventory': None, **_patch_evidence(body, task_id)}
+    prefix = out or ('/private/tmp/grok-cc-final-' + task_id + '-' + uuid.uuid4().hex)
+    txt, metadata = _recovery_output(prefix, row['project'], body, meta)
+    return {'action': 'recovered', 'text_file': txt, 'meta_file': metadata, **meta}
+
+
 class SafeParser(argparse.ArgumentParser):
     def error(self, _message):
         # argparse's default error includes the rejected value, which can be a secret.
@@ -1156,7 +1437,7 @@ def main():
     manager = None
     try:
         parser = SafeParser(description=__doc__)
-        parser.add_argument('command', choices=['ensure', 'create', 'send', 'finish', 'identity', 'reconcile', 'rebind'])
+        parser.add_argument('command', choices=['ensure', 'create', 'send', 'finish', 'identity', 'reconcile', 'rebind', 'recover-final-reply'])
         parser.add_argument('--controller', choices=list(CONTROLLERS))
         parser.add_argument('--session-id')
         parser.add_argument('--project-root')
@@ -1174,7 +1455,13 @@ def main():
         parser.add_argument('--retry-launch')
         parser.add_argument('--confirm-handle')
         parser.add_argument('--confirm-incarnation')
+        parser.add_argument('--ssh-host')
+        parser.add_argument('--ssh-user')
+        parser.add_argument('--expected-host-fp')
+        parser.add_argument('--out')
         args = parser.parse_args()
+        if args.command != 'recover-final-reply' and any(v is not None for v in (args.ssh_host, args.ssh_user, args.expected_host_fp, args.out)):
+            raise Blocked('invalid_input', 'SSH/output arguments require recover-final-reply')
         if args.retry_request is not None:
             raise Blocked('unsupported_contract', 'Native request retry contract is unavailable')
         if args.command != 'create' and (args.create_project is not None or args.confirm or args.retry_launch is not None):
@@ -1189,6 +1476,10 @@ def main():
         owner = resolve_owner(args.controller, args.session_id)
         if args.command == 'identity':
             result = {'owner': owner, 'key': owner_key(owner)}
+        elif args.command == 'recover-final-reply':
+            result = recover_final_reply(args.state_dir, owner, args.task_id, args.message_id or 'main',
+                                         args.ssh_host or '100.84.23.115', args.ssh_user or 'box',
+                                         args.out, args.expected_host_fp)
         else:
             if not args.project_root or not args.worktree:
                 raise Blocked('invalid_input', 'Need project-root and explicit cloud worktree')

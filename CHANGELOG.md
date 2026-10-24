@@ -2,6 +2,13 @@
 
 作者：elvis。
 
+## 0.1.0.dev7 — 2026-10-24
+
+- 新增 recover-final-reply：只读回收当前 bound、accepted 任务的 Claude 原生 JSONL 最终助手 text，保留正文原字节和来源元数据。
+- 严格核验 SSH known_hosts 与可选指纹，禁用连接复用；候选歧义、父链不符、无 end_turn 或无 text 时拒绝，不拼 screen/stream，不重发或 finish。
+- 项目外独占输出；空补丁合法，补丁摘要异常记为 false 并保留原文，仍须原 packet 与 Mac 验收。
+- 仅集成本轮回收能力，不纳入安装侧前序 archive/retire/collect，不覆盖当前 active Skill 或运行状态。真实远端回收未验收。
+
 ## 0.1.0.dev6 — 2026-10-22
 
 - 修复send与reconcile交错时只读evidence变化导致有效回执丢失；仅合并观察字段，真实intent/身份漂移仍阻断，不新增派发。

@@ -114,3 +114,37 @@ BLOCKED在stderr输出JSON，包含category、retryable、task累计attempts和r
 | 模型safeguards拦截 | 按实际provider错误报告，停止；不换模型/身份/编码改写绕过 |
 
 本锁只约束使用同一共享目录的新helper；旧窗口、手工操作或其他机器不受约束。旧窗口须重新读入口，不按空闲池继续派活。
+
+
+## 缺页最终答复回收
+
+作者：elvis。stream 缺页或 screen 裁剪时，可对当前 owner 已受理的任务只读回收 Claude 原生 JSONL 的最终助手文本：
+
+```sh
+python3 <skill-dir>/scripts/session_binding.py recover-final-reply \
+  --controller codex --session-id "$CODEX_THREAD_ID" \
+  --task-id <已有任务UUID> --message-id main \
+  --ssh-host 100.84.23.115 --ssh-user box \
+  --out /private/tmp/<唯一输出前缀> \
+  --expected-host-fp <可信ED25519的SHA256指纹>
+```
+
+`--session-id` 是本地主控原生会话 UUID，不是云端 Claude sessionId。Codex 必须有当前原生 `CODEX_THREAD_ID`；Claudex/Grok 使用既有 `resolve_owner` 规则。当前 binding 必须为 bound，task 必须已存在，目标 message 必须 accepted 且 receipt 的 handle/runtime/incarnation 与 binding 匹配。不创建锁文件、不写 registry，不调用 create/send/finish/rebind；默认完全不调用 Orca，结果 `inventory_checked=false`、`handle_absent_in_inventory=null` 表示未查询，不推断实例存活。
+
+SSH 默认 IP `100.84.23.115`、用户 `box`，使用 BatchMode、StrictHostKeyChecking=yes、UpdateHostKeys=no 和 ED25519，禁用 ControlMaster/ControlPath 连接复用。指定预期指纹时先核 ssh-keyscan 展示值，再核 SSH 握手指纹；keyscan 不写 known_hosts，也不能替代 known_hosts 信任。旧主机钥、未知主机、连接或权限失败均停止；不得自动删除或接受主机钥。主机更新后的可信指纹由用户另行提供，不把短期指纹写成永久信任。
+
+远端在 `~/.claude/projects/` 用 `rg -l --fixed-strings` 搜索 task（覆盖 hello），仅投影 user/assistant 定位字段和 text，丢弃 thinking/tool_use/tool_result 正文。用已接受消息的 `grok-cc-msg:<task>/<message>/<digest前8位>` 定位最后相关 user 轮；旧无标记 prompt 只有原文 SHA 与已保存消息一致才接受。相同 promptId 的纯 tool_result 续轮不切断轮次，其他 user 轮切断；最终 assistant 必须 end_turn、有非空 text，且 parentUuid 父链必须回到选定 user；并列最终分支拒绝。按原序直接拼接 text，不插入换行，不拼 screen/stream，不因模型拦截重导出。
+
+多个相关 JSONL 时仅在 binding 确有数字型 `handle_created_at`、且只有一个 session-env mtime（缺失时用 JSONL mtime）落在创建时间前后 300 秒内才选择；缺少该字段或仍歧义返回候选 sessionId，绝不把 incarnation 字符串猜成创建时间。当前旧 binding 通常没有该时间字段。读取中 JSONL 变化、JSON 损坏、无 end_turn 或无 text 均失败。
+
+`--out` 是前缀，父目录必须已存在、逐级无 symlink，且位于 binding 保存的 Mac 项目外；macOS `/tmp` 别名拒绝，使用 `/private/tmp`。省略时生成 `/private/tmp/grok-cc-final-<task>-<随机值>`。独占创建 mode 0600 的 `<out>.txt` 和 `<out>.meta.json`，不覆盖已有文件。meta 包含 sessionId、助手 uuid、stop_reason、text 块数、正文 SHA256/UTF-8 字节数、binding 身份、task/message、远端 JSONL 路径及补丁标记计数。
+
+成功 stdout 为 `action=recovered`，导出正文成为本次回收真值。补丁 SHA/LF 数校验仅是元数据：空补丁允许 SHA256 `e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855`、PATCH_LINES 0；标记/摘要异常仍导出原文并记 `patch_sha_ok=false`，无标记为 null。此校验不证明 diff 可应用，仍须原 packet 白名单、基线、Mac 验证与适用 Review；回收不等于 finish，也不改变 finish 的活验门禁。
+
+| 回收错误 | 处理 |
+| --- | --- |
+| invalid_input | 原生身份、binding/task、输出路径或参数不合法；不创建回收文件，不改绑定。 |
+| uncertain_send | 目标消息未 accepted 或缺匹配 receipt；保留 intent，不重发。 |
+| identity_changed | 指纹不符或回收期间绑定变化；保留 known_hosts/registry，由用户核验。 |
+| unreachable | SSH/认证/known_hosts/远端读取权限不可用；报告实际阻碍，不自动修复。 |
+| integrity_failure | JSONL 候选歧义、缺失/损坏/变化、无最终 text/end_turn；不猜正文。 |

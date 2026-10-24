@@ -2196,5 +2196,266 @@ class AutoLaunchTests(unittest.TestCase):
                 self.assertFalse(any(a[:2] == ['agent', 'launch'] for a, _ in self.remote.calls))
 
 
+class RecoverFinalReplyTests(unittest.TestCase):
+    setUp = BindingTests.setUp
+    manager = BindingTests.manager
+    explicit_create = BindingTests.explicit_create
+    launch_protocol = None
+    TASK = 'aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa'
+    SESSION = 'bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb'
+
+    def prepare(self):
+        self.explicit_create()
+        self.manager().send(self.TASK, 'main', 'review')
+        self.out = self.root / 'reply'
+        self.before = (self.state / 'bindings.json').read_bytes()
+        self.records = [
+            {'type': 'user', 'uuid': 'u1', 'promptId': 'p1', 'message': {'content':
+                'review\n\ngrok-cc-msg:' + self.TASK + '/main/' + self.mod.hashlib.sha256(b'review').hexdigest()[:8]}},
+            {'type': 'assistant', 'uuid': 'a1', 'parentUuid': 'u1', 'message': {
+                'stop_reason': 'end_turn', 'content': [{'type': 'thinking', 'thinking': 'SECRET'},
+                {'type': 'text', 'text': '结论\nBEGIN_PATCH ' + self.TASK + '\nPATCH_SHA256 ' +
+                 self.mod.hashlib.sha256(b'').hexdigest() + '\nPATCH_LINES 0\nEND_PATCH ' + self.TASK + '\n'}]}}]
+        self.candidates = [{'sessionId': self.SESSION, 'path': '/home/box/.claude/projects/hello/' +
+                            self.SESSION + '.jsonl', 'mtime': 1000, 'records': self.records}]
+
+    def recover(self, **kw):
+        return self.mod.recover_final_reply(self.state, OWNER_A, self.TASK, out=self.out,
+                                           remote_read=lambda *a: self.candidates, **kw)
+
+    def refused(self, category, **kw):
+        with self.assertRaises(self.mod.Blocked) as caught:
+            self.recover(**kw)
+        self.assertEqual(caught.exception.category, category)
+        self.assertFalse(Path(str(self.out) + '.txt').exists())
+        self.assertEqual((self.state / 'bindings.json').read_bytes(), self.before)
+
+    def test_empty_patch_and_no_orca_mutation(self):
+        self.prepare()
+        with patch.object(self.mod.NativeOrca, '__call__', side_effect=AssertionError('no Orca')):
+            result = self.recover()
+        self.assertEqual(result['action'], 'recovered')
+        body = Path(str(self.out) + '.txt').read_bytes()
+        meta = json.loads(Path(str(self.out) + '.meta.json').read_bytes())
+        self.assertNotIn(b'SECRET', body)
+        self.assertEqual(meta['body_sha256'], self.mod.hashlib.sha256(body).hexdigest())
+        self.assertTrue(meta['patch_sha_ok'])
+        self.assertEqual(meta['text_block_count'], 1)
+        self.assertEqual((self.state / 'bindings.json').read_bytes(), self.before)
+
+    def test_multiple_text_blocks_preserve_bytes(self):
+        self.prepare()
+        self.records[-1]['message']['content'] = [{'type': 'text', 'text': 'a\r\n'},
+            {'type': 'tool_use', 'input': {'secret': 'x'}}, {'type': 'text', 'text': '中'}]
+        self.recover()
+        self.assertEqual(Path(str(self.out) + '.txt').read_bytes(), 'a\r\n中'.encode())
+
+    def test_nonaccepted_and_missing_receipt(self):
+        for missing in (False, True):
+            with self.subTest(missing=missing):
+                if not hasattr(self, 'out'): self.prepare()
+                with self.mod.Registry(self.state) as db:
+                    msg = db.data['bindings'][self.mod.owner_key(OWNER_A)]['tasks'][self.TASK]['messages']['main']
+                    msg['state'] = 'accepted' if missing else 'sending'
+                    if missing: msg['receipt'] = {}
+                    db.save()
+                self.before = (self.state / 'bindings.json').read_bytes()
+                self.refused('uncertain_send')
+
+    def test_no_binding_or_wrong_task(self):
+        self.prepare()
+        with self.mod.Registry(self.state) as db:
+            db.data['bindings'][self.mod.owner_key(OWNER_A)]['tasks'] = {}
+            db.save()
+        self.before = (self.state / 'bindings.json').read_bytes()
+        self.refused('invalid_input')
+        with self.mod.Registry(self.state) as db:
+            db.data['bindings'] = {}; db.save()
+        self.before = (self.state / 'bindings.json').read_bytes()
+        self.refused('invalid_input')
+
+    def test_ambiguous_jsonl(self):
+        self.prepare()
+        other = copy.deepcopy(self.candidates[0]); other['sessionId'] = OWNER_B['session_id']
+        other['path'] = str(Path(other['path']).with_name(other['sessionId'] + '.jsonl'))
+        self.candidates.append(other)
+        with self.assertRaises(self.mod.Blocked) as caught:
+            self.recover()
+        self.assertEqual(caught.exception.diagnostic['candidate_session_ids'], [self.SESSION, OWNER_B['session_id']])
+        self.assertFalse(Path(str(self.out) + '.txt').exists())
+
+    def test_no_end_turn_or_no_text(self):
+        self.prepare()
+        self.records[-1]['message']['stop_reason'] = 'tool_use'
+        self.refused('integrity_failure')
+        self.records[-1]['message'].update(stop_reason='end_turn', content=[])
+        self.refused('integrity_failure')
+
+    def test_next_user_turn_is_not_our_answer(self):
+        self.prepare()
+        self.records[-1]['message']['stop_reason'] = 'tool_use'
+        self.records.extend([{'type': 'user', 'message': {'content': 'unrelated'}},
+            {'type': 'assistant', 'uuid': 'other', 'message': {'stop_reason': 'end_turn',
+            'content': [{'type': 'text', 'text': 'wrong answer'}]}}])
+        self.refused('integrity_failure')
+
+    def test_tool_result_continuation(self):
+        self.prepare()
+        self.records.insert(1, {'type': 'user', 'promptId': 'p1', 'message': {
+            'content': [{'type': 'tool_result', 'content': 'not exported'}]}})
+        self.recover()
+
+    def test_invalid_patch_still_exports(self):
+        self.prepare()
+        self.records[-1]['message']['content'][1]['text'] = 'BEGIN_PATCH ' + self.TASK + '\nbroken'
+        self.recover()
+        self.assertFalse(json.loads(Path(str(self.out) + '.meta.json').read_bytes())['patch_sha_ok'])
+
+    def test_output_symlink_or_project_refused(self):
+        self.prepare()
+        self.out = self.project / 'reply'
+        self.refused('invalid_input')
+        alias = self.root / 'alias'; alias.symlink_to(self.root, target_is_directory=True)
+        self.out = alias / 'reply'
+        self.refused('invalid_input')
+
+    def test_fingerprint_mismatch(self):
+        self.prepare()
+        key = 'ssh-ed25519 ' + self.mod.base64.b64encode(b'test-key').decode()
+        with patch.object(self.mod.subprocess, 'run', return_value=subprocess.CompletedProcess([], 0,
+                ('host ' + key + '\n').encode(), b'')) as run:
+            with self.assertRaises(self.mod.Blocked) as caught:
+                self.mod.read_final_candidates('100.84.23.115', 'box', self.TASK, 'SHA256:' + 'A' * 43)
+        self.assertEqual(caught.exception.category, 'identity_changed')
+        self.assertEqual(run.call_count, 1)
+
+    def test_ssh_options_and_handshake_key_change(self):
+        self.prepare()
+        key = self.mod.base64.b64encode(b'test-key')
+        fp = 'SHA256:' + self.mod.base64.b64encode(self.mod.hashlib.sha256(b'test-key').digest()).decode().rstrip('=')
+        scan = subprocess.CompletedProcess([], 0, b'host ssh-ed25519 ' + key + b'\n', b'')
+        response = subprocess.CompletedProcess([], 0, b'[]', b'debug1: Server host key: ssh-ed25519 ' + fp.encode() + b'\n')
+        with patch.object(self.mod.subprocess, 'run', side_effect=[scan, response]) as run:
+            self.assertEqual(self.mod.read_final_candidates('100.84.23.115', 'box', self.TASK, fp), [])
+        args = run.call_args_list[1].args[0]
+        for option in ('BatchMode=yes', 'StrictHostKeyChecking=yes', 'UpdateHostKeys=no'):
+            self.assertIn(option, args)
+        self.assertIn('box@100.84.23.115', args)
+        response.stderr = b'debug1: Server host key: ssh-ed25519 SHA256:' + b'A' * 43 + b'\n'
+        with patch.object(self.mod.subprocess, 'run', side_effect=[scan, response]):
+            with self.assertRaises(self.mod.Blocked) as caught:
+                self.mod.read_final_candidates('100.84.23.115', 'box', self.TASK, fp)
+        self.assertEqual(caught.exception.category, 'identity_changed')
+
+    def test_ssh_unreachable_and_permission(self):
+        self.prepare()
+        for status in (255, 2):
+            with self.subTest(status=status), patch.object(self.mod.subprocess, 'run',
+                    return_value=subprocess.CompletedProcess([], status, b'', b'PRIVATE')):
+                with self.assertRaises(self.mod.Blocked) as caught:
+                    self.mod.read_final_candidates('100.84.23.115', 'box', self.TASK)
+                self.assertEqual(caught.exception.category, 'unreachable')
+                self.assertNotIn('PRIVATE', str(caught.exception.result()))
+
+    def test_remote_projection_executes_on_isolated_jsonl(self):
+        self.prepare()
+        home = self.root / 'remote-home'; project = home / '.claude/projects/-home-box-orca-projects-hello'
+        project.mkdir(parents=True)
+        path = project / (self.SESSION + '.jsonl')
+        path.write_text(''.join(json.dumps(record) + '\n' for record in self.records))
+        sub = project / (self.SESSION + '/subagents'); sub.mkdir(parents=True)
+        (sub / 'agent-example.jsonl').write_text(path.read_text())
+        proc = subprocess.run([sys.executable, '-c', self.mod.RECOVER_REMOTE, self.TASK],
+            capture_output=True, env={**os.environ, 'HOME': str(home)})
+        self.assertEqual(proc.returncode, 0, proc.stderr)
+        result = json.loads(proc.stdout)
+        self.assertEqual(len(result), 1)
+        self.assertNotIn('SECRET', proc.stdout.decode())
+        self.assertEqual(self.mod._final_text(result[0], self.TASK, 'main',
+            self.mod.Registry.inspect(self.state)['bindings'][self.mod.owner_key(OWNER_A)]['tasks'][self.TASK]['messages']['main'])[2], 1)
+        path.write_text('{bad JSON')
+        proc = subprocess.run([sys.executable, '-c', self.mod.RECOVER_REMOTE, self.TASK],
+            capture_output=True, env={**os.environ, 'HOME': str(home)})
+        # No task occurrence is a legitimate empty search, never a guessed answer.
+        self.assertEqual(json.loads(proc.stdout), [])
+
+    def test_message_marker_separates_export(self):
+        self.prepare()
+        self.records[0]['message']['content'] = self.records[0]['message']['content'].replace('/main/', '/export-1/')
+        self.refused('integrity_failure')
+
+    def test_existing_output_not_overwritten(self):
+        self.prepare()
+        meta = Path(str(self.out) + '.meta.json'); meta.write_text('keep')
+        self.refused('invalid_input')
+        self.assertEqual(meta.read_text(), 'keep')
+
+    def test_cli_native_owner_and_no_registry_creation(self):
+        self.prepare()
+        absent = self.root / 'absent-state'
+        args = [sys.executable, '-B', str(TARGET), 'recover-final-reply', '--controller', 'codex',
+                '--session-id', OWNER_A['session_id'], '--task-id', self.TASK, '--state-dir', str(absent)]
+        env = {k: v for k, v in os.environ.items() if k not in ('CODEX_THREAD_ID', 'CLAUDE_SESSION_ID', 'GROK_SESSION_ID')}
+        for native in (False, True):
+            if native: env['CODEX_THREAD_ID'] = OWNER_A['session_id']
+            proc = subprocess.run(args, capture_output=True, text=True, env=env)
+            self.assertEqual(json.loads(proc.stderr)['category'], 'invalid_input')
+            self.assertFalse(absent.exists())
+
+    def test_unrelated_assistant_branch_refused(self):
+        self.prepare()
+        self.records[-1]['parentUuid'] = 'different-user'
+        self.refused('integrity_failure')
+
+    def test_real_tool_result_parent_chain(self):
+        self.prepare()
+        self.records.insert(1, {'type': 'assistant', 'uuid': 'tool-call', 'parentUuid': 'u1',
+            'message': {'stop_reason': 'tool_use', 'content': []}})
+        self.records.insert(2, {'type': 'user', 'uuid': 'tool-response', 'parentUuid': 'tool-call',
+            'promptId': 'p1', 'message': {'content': [{'type': 'tool_result'}]}})
+        self.records[-1]['parentUuid'] = 'tool-response'
+        self.recover()
+
+    def test_timestamp_disambiguation_only_with_binding_evidence(self):
+        self.prepare()
+        other = copy.deepcopy(self.candidates[0]); other.update(sessionId=OWNER_B['session_id'],
+            path='/home/box/.claude/projects/hello/' + OWNER_B['session_id'] + '.jsonl', mtime=5000)
+        self.candidates.append(other)
+        with self.mod.Registry(self.state) as db:
+            db.data['bindings'][self.mod.owner_key(OWNER_A)]['handle_created_at'] = 1000
+            db.save()
+        result = self.recover()
+        self.assertEqual(result['sessionId'], self.SESSION)
+
+    def test_cli_recovery_with_fake_ssh_only(self):
+        self.prepare()
+        fixture_bin = self.root / 'bin'; fixture_bin.mkdir()
+        ssh = fixture_bin / 'ssh'
+        ssh.write_text('#!' + sys.executable + '\nimport sys\nassert "StrictHostKeyChecking=yes" in sys.argv\n'
+                       + 'sys.stdin.read()\nprint(' + repr(json.dumps(self.candidates)) + ')\n')
+        ssh.chmod(0o700)
+        env = self.fixture_env() if hasattr(self, 'fixture_env') else dict(os.environ)
+        env.update(PATH=str(fixture_bin), CODEX_THREAD_ID=OWNER_A['session_id'])
+        args = [sys.executable, '-B', str(TARGET), 'recover-final-reply', '--controller', 'codex',
+                '--session-id', OWNER_A['session_id'], '--task-id', self.TASK, '--state-dir', str(self.state),
+                '--out', str(self.out)]
+        proc = subprocess.run(args, capture_output=True, text=True, env=env)
+        self.assertEqual(proc.returncode, 0, proc.stderr)
+        self.assertEqual(json.loads(proc.stdout)['action'], 'recovered')
+        self.assertEqual((self.state / 'bindings.json').read_bytes(), self.before)
+
+    def test_registry_drift_during_read_refused(self):
+        self.prepare()
+        def read(*args):
+            with self.mod.Registry(self.state) as db:
+                db.data['bindings'][self.mod.owner_key(OWNER_A)]['active_task'] = None
+                db.save()
+            return self.candidates
+        with self.assertRaises(self.mod.Blocked) as caught:
+            self.mod.recover_final_reply(self.state, OWNER_A, self.TASK, out=self.out, remote_read=read)
+        self.assertEqual(caught.exception.category, 'identity_changed')
+        self.assertFalse(Path(str(self.out) + '.txt').exists())
+
+
 if __name__ == '__main__':
     unittest.main()
