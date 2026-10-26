@@ -2,6 +2,18 @@
 
 作者：elvis。
 
+## 0.1.0.dev11 — 2026-10-26
+
+- recover 投影瘦身：user 文本只留 `grok-cc-msg:` 或 task_id 窗口，并附原文 `prompt_sha256`；assistant 只保留 end_turn 全文。
+- 单次 SSH 子进程超时从 90 秒改为 240 秒。尝试次数仍最多 3 次，主机钥和 JSONL 失败仍不重试。
+- 不改 known_hosts。活动 skill 随本轮手术安装更新。
+
+## 0.1.0.dev10 — 2026-10-26
+
+- recover-final-reply 的 SSH `ConnectTimeout` 改为 20 秒，单次子进程超时改为 90 秒。
+- 仅 `timeout` 和进程尚未启动的 `handshake_failed` 最多尝试 3 次，间隔 2 秒和 5 秒。
+- 主机钥失败、JSONL 读取失败和父链失败不重试；不改 known_hosts。该中间标签未单独发布，活动 skill 以 0.1.0.dev11 为准。
+
 ## 0.1.0.dev9 — 2026-10-26
 
 - recover-final-reply 投影为非 user/assistant 记录保留 `type`、`uuid`、`parentUuid`，父链可以穿过 attachment 等中间节点。

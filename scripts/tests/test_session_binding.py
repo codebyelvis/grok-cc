@@ -2389,7 +2389,7 @@ class RecoverFinalReplyTests(unittest.TestCase):
             ('not-list', subprocess.CompletedProcess([], 0, b'{}', leak), 'integrity_failure', 'jsonl_read_failed'),
         )
         for name, outcome, category, kind in cases:
-            with self.subTest(name=name):
+            with self.subTest(name=name), patch.object(self.mod.time, 'sleep'):
                 kwargs = {'side_effect': outcome} if isinstance(outcome, BaseException) else {'return_value': outcome}
                 with patch.object(self.mod.subprocess, 'run', **kwargs) as run:
                     with self.assertRaises(self.mod.Blocked) as caught:
@@ -2409,6 +2409,61 @@ class RecoverFinalReplyTests(unittest.TestCase):
                     self.assertNotIn('SSH', caught.exception.detail)
                 self.assertFalse(Path(str(self.out) + '.txt').exists())
                 self.assertEqual((self.state / 'bindings.json').read_bytes(), self.before)
+
+    def test_recover_ssh_retries_only_transient_timeouts(self):
+        self.prepare()
+        ok = subprocess.CompletedProcess([], 0, b'[]', b'')
+
+        def run_case(name, outcomes, calls, sleeps, check):
+            with self.subTest(name=name), patch.object(self.mod.time, 'sleep') as sleep, \
+                    patch.object(self.mod.subprocess, 'run', side_effect=outcomes) as run:
+                check()
+                self.assertEqual(run.call_count, calls)
+                self.assertEqual([item.args[0] for item in sleep.call_args_list], sleeps)
+                for item in run.call_args_list:
+                    command = item.args[0]
+                    if command[0] != 'ssh':
+                        continue
+                    self.assertIn('ConnectTimeout=20', command)
+                    self.assertEqual(item.kwargs['timeout'], 240)
+                    for option in ('BatchMode=yes', 'StrictHostKeyChecking=yes', 'UpdateHostKeys=no',
+                                   'HostKeyAlgorithms=ssh-ed25519', 'ControlMaster=no'):
+                        self.assertIn(option, command)
+
+        def later_success():
+            self.assertEqual(self.mod.read_final_candidates('100.84.23.115', 'box', self.TASK), [])
+        run_case('later-success', [subprocess.TimeoutExpired(['ssh'], 90),
+                                   subprocess.TimeoutExpired(['ssh'], 90), ok], 3, [2, 5], later_success)
+
+        def exhausted():
+            with self.assertRaises(self.mod.Blocked) as caught:
+                self.mod.read_final_candidates('100.84.23.115', 'box', self.TASK)
+            self.assertEqual(caught.exception.category, 'unreachable')
+            self.assertEqual(caught.exception.diagnostic, {'kind': 'timeout'})
+            self.assertEqual(caught.exception.attempts, 3)
+            self.assertNotIn('PRIVATE', json.dumps(caught.exception.result()))
+        run_case('exhausted', [subprocess.TimeoutExpired(['ssh', 'PRIVATE'], 90)] * 3, 3, [2, 5], exhausted)
+
+        def host_key():
+            with self.assertRaises(self.mod.Blocked) as caught:
+                self.mod.read_final_candidates('100.84.23.115', 'box', self.TASK)
+            self.assertEqual(caught.exception.category, 'identity_changed')
+            self.assertEqual(caught.exception.diagnostic, {'kind': 'host_key_mismatch'})
+            self.assertEqual(caught.exception.attempts, 1)
+        run_case('host-key', [subprocess.CompletedProcess([], 255, b'', b'Host key verification failed.\nPRIVATE')],
+                 1, [], host_key)
+
+        def oserror_then_success():
+            self.assertEqual(self.mod.read_final_candidates('100.84.23.115', 'box', self.TASK), [])
+        run_case('oserror', [OSError('PRIVATE'), OSError('PRIVATE'), ok], 3, [2, 5], oserror_then_success)
+
+        def jsonl_once():
+            with self.assertRaises(self.mod.Blocked) as caught:
+                self.mod.read_final_candidates('100.84.23.115', 'box', self.TASK)
+            self.assertEqual(caught.exception.diagnostic, {'kind': 'jsonl_read_failed'})
+            self.assertEqual(caught.exception.attempts, 1)
+            self.assertNotIn('PRIVATE', json.dumps(caught.exception.result()))
+        run_case('jsonl', [subprocess.CompletedProcess([], 2, b'PRIVATE', b'PRIVATE')], 1, [], jsonl_once)
 
     def test_remote_projection_executes_on_isolated_jsonl(self):
         self.prepare()
@@ -2501,6 +2556,66 @@ class RecoverFinalReplyTests(unittest.TestCase):
         self.assertEqual(result['action'], 'recovered')
         self.assertIn('结论', body)
         self.assertNotIn('SECRET', body)
+
+    def test_remote_projection_windows_large_user_text(self):
+        self.prepare()
+        home = self.root / 'remote-home'
+        project = home / '.claude/projects/-home-box-orca-projects-hello'
+        project.mkdir(parents=True)
+        user, assistant = copy.deepcopy(self.records)
+        marker = user['message']['content']
+        secret = 'PROMPT-BODY-SECRET' + ('Q' * 240000)
+        user['message']['content'] = secret + marker
+        bulky = {'type': 'assistant', 'uuid': 'bulky', 'parentUuid': 'u1',
+                 'message': {'stop_reason': 'tool_use',
+                             'content': [{'type': 'text', 'text': 'ASSISTANT-SECRET' + ('Z' * 80000)}]}}
+        assistant['parentUuid'] = 'bulky'
+        records = [user, bulky, assistant]
+        (project / (self.SESSION + '.jsonl')).write_text(''.join(json.dumps(record) + '\n' for record in records))
+        proc = subprocess.run([sys.executable, '-c', self.mod.RECOVER_REMOTE, self.TASK],
+            capture_output=True, env={**os.environ, 'HOME': str(home)})
+        self.assertEqual(proc.returncode, 0, proc.stderr)
+        self.assertLess(len(proc.stdout), 50 * 1024)
+        rendered = proc.stdout.decode()
+        self.assertNotIn('PROMPT-BODY-SECRET', rendered)
+        self.assertNotIn('ASSISTANT-SECRET', rendered)
+        self.assertIn('grok-cc-msg:' + self.TASK, rendered)
+        self.assertIn('结论', rendered)
+        projected = json.loads(rendered)
+        self.assertEqual(projected[0]['records'][1]['uuid'], 'bulky')
+        self.assertNotIn('text', json.dumps(projected[0]['records'][1]))
+        self.candidates = projected
+        result = self.recover()
+        body = Path(str(self.out) + '.txt').read_text()
+        self.assertEqual(result['action'], 'recovered')
+        self.assertIn('结论', body)
+        self.assertNotIn('PROMPT-BODY-SECRET', body)
+
+        plain = 'OLDPROMPT-SECRET' + ('Q' * 80000) + self.TASK + '-tail'
+        digest = self.mod.hashlib.sha256(plain.encode()).hexdigest()
+        with self.mod.Registry(self.state) as db:
+            db.data['bindings'][self.mod.owner_key(OWNER_A)]['tasks'][self.TASK]['messages']['main']['sha256'] = digest
+            db.save()
+        self.before = (self.state / 'bindings.json').read_bytes()
+        unmarked = {'type': 'user', 'uuid': 'u1', 'promptId': 'p1', 'message': {'content': plain}}
+        assistant = copy.deepcopy(assistant)
+        assistant['parentUuid'] = 'u1'
+        (project / (self.SESSION + '.jsonl')).write_text(''.join(json.dumps(record) + '\n' for record in (unmarked, assistant)))
+        proc = subprocess.run([sys.executable, '-c', self.mod.RECOVER_REMOTE, self.TASK],
+            capture_output=True, env={**os.environ, 'HOME': str(home)})
+        self.assertEqual(proc.returncode, 0, proc.stderr)
+        rendered = proc.stdout.decode()
+        self.assertNotIn('OLDPROMPT-SECRET', rendered)
+        self.assertLess(len(proc.stdout), 50 * 1024)
+        projected = json.loads(rendered)
+        self.assertEqual(projected[0]['records'][0]['prompt_sha256'], digest)
+        self.out = self.root / 'reply-unmarked'
+        self.candidates = projected
+        result = self.recover()
+        body = Path(str(self.out) + '.txt').read_text()
+        self.assertEqual(result['action'], 'recovered')
+        self.assertIn('结论', body)
+        self.assertNotIn('OLDPROMPT-SECRET', body)
 
     def test_linked_parent_chain_still_refuses_other_user_or_missing_uuid(self):
         self.prepare()

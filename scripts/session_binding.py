@@ -1149,11 +1149,60 @@ class BindingManager:
 
 # Read-only recovery deliberately lives outside BindingManager: no registry locks or Orca calls.
 RECOVER_REMOTE = r'''
-import json, os, pathlib, subprocess, sys, uuid
+import hashlib, json, os, pathlib, subprocess, sys, uuid
 root = pathlib.Path.home() / '.claude/projects'
-search = subprocess.run(['rg', '-l', '--null', '--fixed-strings', '--glob', '*.jsonl', '--', sys.argv[1], str(root)], capture_output=True)
+task = sys.argv[1]
+search = subprocess.run(['rg', '-l', '--null', '--fixed-strings', '--glob', '*.jsonl', '--', task, str(root)], capture_output=True)
 if search.returncode not in (0, 1):
     sys.exit(2)
+
+def trim_user_text(text):
+    if task not in text:
+        return text[:512] if len(text) > 512 else text
+    idx = text.find(task)
+    lo = max(0, idx - 256)
+    hi = min(len(text), idx + max(len(task) + 96, 1024))
+    marker_at = text.find('grok-cc-msg:' + task)
+    if marker_at >= 0:
+        lo = max(0, marker_at - 64)
+        hi = min(len(text), marker_at + 180)
+    stub = text[lo:hi]
+    if lo > 0:
+        stub = '\u2026' + stub
+    if hi < len(text):
+        stub = stub + '\u2026'
+    return stub
+
+def project_content(kind, content, stop):
+    if isinstance(content, str):
+        if kind == 'user':
+            return trim_user_text(content)
+        return content if stop == 'end_turn' else ''
+    if not isinstance(content, list):
+        return content
+    projected = []
+    for block in content:
+        if not isinstance(block, dict):
+            continue
+        if block.get('type') == 'text' and isinstance(block.get('text'), str):
+            if kind == 'user':
+                projected.append({'type': 'text', 'text': trim_user_text(block['text'])})
+            elif stop == 'end_turn':
+                projected.append({'type': 'text', 'text': block['text']})
+        elif block.get('type') == 'tool_result':
+            projected.append({'type': 'tool_result'})
+    return projected
+
+def prompt_sha(content):
+    if isinstance(content, str):
+        plain = content
+    elif isinstance(content, list):
+        plain = ''.join(block.get('text') for block in content
+                        if isinstance(block, dict) and block.get('type') == 'text' and isinstance(block.get('text'), str))
+    else:
+        plain = ''
+    return hashlib.sha256(plain.encode()).hexdigest()
+
 result = []
 for rawpath in search.stdout.split(b'\0'):
     if not rawpath: continue
@@ -1170,7 +1219,8 @@ for rawpath in search.stdout.split(b'\0'):
     with path.open(encoding='utf-8') as stream:
         for line in stream:
             item = json.loads(line)
-            if item.get('type') not in ('user', 'assistant'):
+            kind = item.get('type')
+            if kind not in ('user', 'assistant'):
                 link_type, link_uuid, link_parent = (item.get(key) for key in ('type', 'uuid', 'parentUuid'))
                 if (isinstance(link_type, str) and 0 < len(link_type) <= 64
                         and isinstance(link_uuid, str) and link_uuid
@@ -1179,12 +1229,12 @@ for rawpath in search.stdout.split(b'\0'):
                 continue
             msg = item.get('message', {})
             content = msg.get('content', [])
-            if isinstance(content, list):
-                content = [({'type': 'text', 'text': b.get('text')} if b.get('type') == 'text'
-                            else {'type': 'tool_result'}) for b in content
-                           if b.get('type') in ('text', 'tool_result')]
-            records.append({**{k: item[k] for k in ('type', 'uuid', 'parentUuid', 'promptId', 'sessionId', 'isSidechain') if k in item},
-                'message': {'content': content, 'stop_reason': msg.get('stop_reason')}})
+            stop = msg.get('stop_reason')
+            record = {**{k: item[k] for k in ('type', 'uuid', 'parentUuid', 'promptId', 'sessionId', 'isSidechain') if k in item},
+                'message': {'content': project_content(kind, content, stop), 'stop_reason': stop}}
+            if kind == 'user':
+                record['prompt_sha256'] = prompt_sha(content)
+            records.append(record)
     after = path.stat()
     if (before.st_ino, before.st_size, before.st_mtime_ns) != (after.st_ino, after.st_size, after.st_mtime_ns): sys.exit(3)
     env = pathlib.Path.home() / '.claude/session-env' / path.stem
@@ -1215,14 +1265,19 @@ def _host_key_verification_failed(stderr):
     return any(marker in lowered for marker in _HOST_KEY_FAILURE_MARKERS)
 
 
-def read_final_candidates(host, user, task_id, expected_host_fp=None):
-    """Strict known_hosts remains authoritative even when a fingerprint is supplied."""
-    if (not isinstance(host, str) or not re.fullmatch(r'[A-Za-z0-9][A-Za-z0-9.-]{0,252}', host)
-            or not isinstance(user, str) or not re.fullmatch(r'[A-Za-z_][A-Za-z0-9_-]{0,63}', user)
-            or _uuid_or_none(task_id) != task_id):
-        raise Blocked('invalid_input', 'Invalid SSH destination or task UUID')
-    if expected_host_fp is not None and not re.fullmatch(r'SHA256:[A-Za-z0-9+/]{43}', expected_host_fp):
-        raise Blocked('invalid_input', 'Expected host fingerprint must be SHA256')
+_RECOVER_SSH_ATTEMPTS = 3
+_RECOVER_SSH_BACKOFF_S = (2, 5)
+_RECOVER_SSH_TIMEOUT_S = 240
+
+
+def _recover_ssh_retryable(blocked):
+    kind = blocked.diagnostic.get('kind') if isinstance(blocked.diagnostic, dict) else None
+    if kind == 'timeout':
+        return True
+    return kind == 'handshake_failed' and blocked.detail == 'SSH unavailable; preserve host keys and binding'
+
+
+def _read_final_candidates_once(host, user, task_id, expected_host_fp):
     try:
         if expected_host_fp:
             scan = subprocess.run(['ssh-keyscan', '-T', '10', '-t', 'ed25519', host],
@@ -1237,12 +1292,12 @@ def read_final_candidates(host, user, task_id, expected_host_fp=None):
                 raise _recovery_ssh_blocked('identity_changed', 'SSH host fingerprint differs; known_hosts unchanged',
                                             'host_key_mismatch')
         command = ['ssh', '-v', '-T', '-o', 'BatchMode=yes', '-o', 'StrictHostKeyChecking=yes',
-                   '-o', 'UpdateHostKeys=no', '-o', 'ConnectTimeout=10',
+                   '-o', 'UpdateHostKeys=no', '-o', 'ConnectTimeout=20',
                    '-o', 'ControlMaster=no', '-o', 'ControlPath=none',
                    '-o', 'HostKeyAlgorithms=ssh-ed25519', user + '@' + host,
                    'python3 - ' + task_id]
         response = subprocess.run(command, input=('import sys\ntry:\n' + ''.join('    ' + line + '\n' for line in RECOVER_REMOTE.splitlines())
-                                         + 'except PermissionError:\n    sys.exit(2)\n').encode(), capture_output=True, timeout=60)
+                                         + 'except PermissionError:\n    sys.exit(2)\n').encode(), capture_output=True, timeout=_RECOVER_SSH_TIMEOUT_S)
     except Blocked:
         raise
     except subprocess.TimeoutExpired:
@@ -1278,6 +1333,24 @@ def read_final_candidates(host, user, task_id, expected_host_fp=None):
     return value
 
 
+def read_final_candidates(host, user, task_id, expected_host_fp=None):
+    """Strict known_hosts remains authoritative even when a fingerprint is supplied."""
+    if (not isinstance(host, str) or not re.fullmatch(r'[A-Za-z0-9][A-Za-z0-9.-]{0,252}', host)
+            or not isinstance(user, str) or not re.fullmatch(r'[A-Za-z_][A-Za-z0-9_-]{0,63}', user)
+            or _uuid_or_none(task_id) != task_id):
+        raise Blocked('invalid_input', 'Invalid SSH destination or task UUID')
+    if expected_host_fp is not None and not re.fullmatch(r'SHA256:[A-Za-z0-9+/]{43}', expected_host_fp):
+        raise Blocked('invalid_input', 'Expected host fingerprint must be SHA256')
+    for attempt in range(1, _RECOVER_SSH_ATTEMPTS + 1):
+        try:
+            return _read_final_candidates_once(host, user, task_id, expected_host_fp)
+        except Blocked as blocked:
+            if attempt == _RECOVER_SSH_ATTEMPTS or not _recover_ssh_retryable(blocked):
+                blocked.attempts = attempt
+                raise
+            time.sleep(_RECOVER_SSH_BACKOFF_S[attempt - 1])
+
+
 def _recovery_target(state, owner, task_id, message_id):
     if _uuid_or_none(task_id) != task_id or not re.fullmatch(r'[A-Za-z0-9_-]{1,64}', message_id):
         raise Blocked('invalid_input', 'Need canonical task UUID and message ID')
@@ -1310,6 +1383,9 @@ def _final_text(candidate, task_id, message_id, message, locate_only=False):
     for record in records:
         if _parent_link_record(record):
             continue
+        remote_sha = record.get('prompt_sha256')
+        if remote_sha is not None and not (isinstance(remote_sha, str) and re.fullmatch(r'[0-9a-f]{64}', remote_sha)):
+            raise Blocked('integrity_failure', 'Invalid JSONL content')
         msg = record.get('message')
         if not isinstance(msg, dict):
             raise Blocked('integrity_failure', 'Invalid JSONL message')
@@ -1327,8 +1403,10 @@ def _final_text(candidate, task_id, message_id, message, locate_only=False):
             continue
         content = record.get('message', {}).get('content')
         texts = [content] if isinstance(content, str) else [b.get('text', '') for b in content or [] if b.get('type') == 'text']
-        if any(marker in t for t in texts) or (task_id in ''.join(texts)
-                and hashlib.sha256(''.join(texts).encode()).hexdigest() == message.get('sha256')):
+        joined = ''.join(texts)
+        remote_sha = record.get('prompt_sha256')
+        digest = remote_sha if isinstance(remote_sha, str) else hashlib.sha256(joined.encode()).hexdigest()
+        if any(marker in t for t in texts) or (task_id in joined and digest == message.get('sha256')):
             starts.append(i)
     if not starts:
         return None
