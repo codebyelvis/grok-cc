@@ -1170,7 +1170,13 @@ for rawpath in search.stdout.split(b'\0'):
     with path.open(encoding='utf-8') as stream:
         for line in stream:
             item = json.loads(line)
-            if item.get('type') not in ('user', 'assistant'): continue
+            if item.get('type') not in ('user', 'assistant'):
+                link_type, link_uuid, link_parent = (item.get(key) for key in ('type', 'uuid', 'parentUuid'))
+                if (isinstance(link_type, str) and 0 < len(link_type) <= 64
+                        and isinstance(link_uuid, str) and link_uuid
+                        and isinstance(link_parent, str)):
+                    records.append({'type': link_type, 'uuid': link_uuid, 'parentUuid': link_parent})
+                continue
             msg = item.get('message', {})
             content = msg.get('content', [])
             if isinstance(content, list):
@@ -1289,12 +1295,21 @@ def _recovery_target(state, owner, task_id, message_id):
     return row, message
 
 
+def _parent_link_record(record):
+    return (isinstance(record, dict) and set(record) == {'type', 'uuid', 'parentUuid'}
+            and isinstance(record.get('type'), str) and record['type'] not in ('user', 'assistant')
+            and 0 < len(record['type']) <= 64 and isinstance(record.get('uuid'), str) and record['uuid']
+            and isinstance(record.get('parentUuid'), str))
+
+
 def _final_text(candidate, task_id, message_id, message, locate_only=False):
     records = candidate.get('records')
     if not isinstance(records, list) or not all(isinstance(r, dict) for r in records):
         raise Blocked('integrity_failure', 'Malformed JSONL records')
     marker = 'grok-cc-msg:' + task_id + '/' + message_id + '/' + message.get('sha256', '')[:8]
     for record in records:
+        if _parent_link_record(record):
+            continue
         msg = record.get('message')
         if not isinstance(msg, dict):
             raise Blocked('integrity_failure', 'Invalid JSONL message')

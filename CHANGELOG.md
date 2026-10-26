@@ -2,6 +2,12 @@
 
 作者：elvis。
 
+## 0.1.0.dev9 — 2026-10-26
+
+- recover-final-reply 投影为非 user/assistant 记录保留 `type`、`uuid`、`parentUuid`，父链可以穿过 attachment 等中间节点。
+- 这些记录的 message、attachment 正文、文件快照和其他字段不传出。回到另一条 user、中间 uuid 缺失或成环仍拒绝。
+- 屏幕片段仍不能批准。真实远端回收未验收，active Skill 未更新。
+
 ## 0.1.0.dev8 — 2026-10-26
 
 - recover-final-reply 用 `diagnostic.kind` 区分 `timeout`、`handshake_failed`、`host_key_mismatch`、`jsonl_read_failed`。

@@ -2469,6 +2469,64 @@ class RecoverFinalReplyTests(unittest.TestCase):
         self.records[-1]['parentUuid'] = 'tool-response'
         self.recover()
 
+    def test_attachment_parent_link_exports_text_without_payload(self):
+        self.prepare()
+        home = self.root / 'remote-home'
+        project = home / '.claude/projects/-home-box-orca-projects-hello'
+        project.mkdir(parents=True)
+        user, assistant = self.records
+        assistant = copy.deepcopy(assistant)
+        assistant['parentUuid'] = 'snap'
+        records = [user,
+            {'type': 'attachment', 'uuid': 'att', 'parentUuid': 'u1',
+             'attachment': {'body': 'ATTACHMENT-BODY-SECRET'}},
+            {'type': 'file-history-snapshot', 'uuid': 'snap', 'parentUuid': 'att',
+             'snapshot': {'content': 'SNAPSHOT-BODY-SECRET'}},
+            assistant]
+        (project / (self.SESSION + '.jsonl')).write_text(''.join(json.dumps(record) + '\n' for record in records))
+        proc = subprocess.run([sys.executable, '-c', self.mod.RECOVER_REMOTE, self.TASK],
+            capture_output=True, env={**os.environ, 'HOME': str(home)})
+        self.assertEqual(proc.returncode, 0, proc.stderr)
+        rendered = proc.stdout.decode()
+        self.assertNotIn('ATTACHMENT-BODY-SECRET', rendered)
+        self.assertNotIn('SNAPSHOT-BODY-SECRET', rendered)
+        projected = json.loads(rendered)
+        links = [record for record in projected[0]['records'] if record.get('type') not in ('user', 'assistant')]
+        self.assertEqual([(link['type'], link['uuid'], link['parentUuid']) for link in links],
+                         [('attachment', 'att', 'u1'), ('file-history-snapshot', 'snap', 'att')])
+        self.assertTrue(all(set(link) == {'type', 'uuid', 'parentUuid'} for link in links))
+        self.candidates = projected
+        result = self.recover()
+        body = Path(str(self.out) + '.txt').read_text()
+        self.assertEqual(result['action'], 'recovered')
+        self.assertIn('结论', body)
+        self.assertNotIn('SECRET', body)
+
+    def test_linked_parent_chain_still_refuses_other_user_or_missing_uuid(self):
+        self.prepare()
+        marked, assistant = self.records
+        def recover_chain(records):
+            self.candidates[0]['records'] = records
+            with self.assertRaises(self.mod.Blocked) as caught:
+                self.recover()
+            self.assertEqual(caught.exception.category, 'integrity_failure')
+            self.assertEqual(caught.exception.detail,
+                             'Final assistant ancestry does not reach the accepted user turn')
+            self.assertFalse(Path(str(self.out) + '.txt').exists())
+            self.assertEqual((self.state / 'bindings.json').read_bytes(), self.before)
+        assistant = {**assistant, 'parentUuid': 'att'}
+        with self.subTest(name='other-user'):
+            recover_chain([
+                {'type': 'user', 'uuid': 'other-user', 'message': {'content': 'another turn'}},
+                marked,
+                {'type': 'attachment', 'uuid': 'att', 'parentUuid': 'other-user'},
+                assistant])
+        with self.subTest(name='missing-uuid'):
+            recover_chain([
+                marked,
+                {'type': 'attachment', 'uuid': 'att', 'parentUuid': 'missing-link'},
+                assistant])
+
     def test_timestamp_disambiguation_only_with_binding_evidence(self):
         self.prepare()
         other = copy.deepcopy(self.candidates[0]); other.update(sessionId=OWNER_B['session_id'],
