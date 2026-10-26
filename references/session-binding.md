@@ -131,7 +131,7 @@ python3 <skill-dir>/scripts/session_binding.py recover-final-reply \
 
 `--session-id` 是本地主控原生会话 UUID，不是云端 Claude sessionId。Codex 必须有当前原生 `CODEX_THREAD_ID`；Claudex/Grok 使用既有 `resolve_owner` 规则。当前 binding 必须为 bound，task 必须已存在，目标 message 必须 accepted 且 receipt 的 handle/runtime/incarnation 与 binding 匹配。不创建锁文件、不写 registry，不调用 create/send/finish/rebind；默认完全不调用 Orca，结果 `inventory_checked=false`、`handle_absent_in_inventory=null` 表示未查询，不推断实例存活。
 
-SSH 默认 IP `100.84.23.115`、用户 `box`，使用 BatchMode、StrictHostKeyChecking=yes、UpdateHostKeys=no 和 ED25519，禁用 ControlMaster/ControlPath 连接复用。指定预期指纹时先核 ssh-keyscan 展示值，再核 SSH 握手指纹；keyscan 不写 known_hosts，也不能替代 known_hosts 信任。旧主机钥、未知主机、连接或权限失败均停止；不得自动删除或接受主机钥。主机更新后的可信指纹由用户另行提供，不把短期指纹写成永久信任。
+SSH 默认 IP `100.84.23.115`、用户 `box`，使用 BatchMode、StrictHostKeyChecking=yes、UpdateHostKeys=no 和 ED25519，禁用 ControlMaster/ControlPath 连接复用。指定预期指纹时先核 ssh-keyscan 展示值，再核 SSH 握手指纹；keyscan 不写 known_hosts，也不能替代 known_hosts 信任。主机密钥验证失败（指纹不符、未知主机，或 SSH 退出码 255 且 stderr 表明 host key verification 失败）为 `identity_changed` / `host_key_mismatch`，不得自动删除或接受主机钥。连接或认证未完成是 `unreachable` / `handshake_failed`，子进程超时是 `unreachable` / `timeout`。SSH 已返回非 255，但搜索、权限或投影解析失败是 `integrity_failure` / `jsonl_read_failed`。这些结果只含固定 kind，不含远端 stderr、主机钥或命令输出。屏幕片段仍不能批准。主机更新后的可信指纹由用户另行提供，不把短期指纹写成永久信任。
 
 远端在 `~/.claude/projects/` 用 `rg -l --fixed-strings` 搜索 task（覆盖 hello），仅投影 user/assistant 定位字段和 text，丢弃 thinking/tool_use/tool_result 正文。用已接受消息的 `grok-cc-msg:<task>/<message>/<digest前8位>` 定位最后相关 user 轮；旧无标记 prompt 只有原文 SHA 与已保存消息一致才接受。相同 promptId 的纯 tool_result 续轮不切断轮次，其他 user 轮切断；最终 assistant 必须 end_turn、有非空 text，且 parentUuid 父链必须回到选定 user；并列最终分支拒绝。按原序直接拼接 text，不插入换行，不拼 screen/stream，不因模型拦截重导出。
 
@@ -145,6 +145,6 @@ SSH 默认 IP `100.84.23.115`、用户 `box`，使用 BatchMode、StrictHostKeyC
 | --- | --- |
 | invalid_input | 原生身份、binding/task、输出路径或参数不合法；不创建回收文件，不改绑定。 |
 | uncertain_send | 目标消息未 accepted 或缺匹配 receipt；保留 intent，不重发。 |
-| identity_changed | 指纹不符或回收期间绑定变化；保留 known_hosts/registry，由用户核验。 |
-| unreachable | SSH/认证/known_hosts/远端读取权限不可用；报告实际阻碍，不自动修复。 |
-| integrity_failure | JSONL 候选歧义、缺失/损坏/变化、无最终 text/end_turn；不猜正文。 |
+| identity_changed | 指纹不符、主机密钥验证失败（kind=`host_key_mismatch`），或回收期间绑定变化；保留 known_hosts/registry，由用户核验。 |
+| unreachable | 握手未完成（kind=`handshake_failed`）或子进程超时（kind=`timeout`）；报告实际阻碍，不自动修复。 |
+| integrity_failure | SSH 已完成但搜索、权限或投影解析失败时 kind=`jsonl_read_failed`。候选歧义、缺失/损坏/变化、无最终 text/end_turn 仍拒绝；不猜正文。 |

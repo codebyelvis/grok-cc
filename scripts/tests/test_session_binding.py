@@ -2327,6 +2327,8 @@ class RecoverFinalReplyTests(unittest.TestCase):
             with self.assertRaises(self.mod.Blocked) as caught:
                 self.mod.read_final_candidates('100.84.23.115', 'box', self.TASK, 'SHA256:' + 'A' * 43)
         self.assertEqual(caught.exception.category, 'identity_changed')
+        self.assertEqual(caught.exception.diagnostic, {'kind': 'host_key_mismatch'})
+        self.assertNotIn('test-key', json.dumps(caught.exception.result()))
         self.assertEqual(run.call_count, 1)
 
     def test_ssh_options_and_handshake_key_change(self):
@@ -2346,16 +2348,67 @@ class RecoverFinalReplyTests(unittest.TestCase):
             with self.assertRaises(self.mod.Blocked) as caught:
                 self.mod.read_final_candidates('100.84.23.115', 'box', self.TASK, fp)
         self.assertEqual(caught.exception.category, 'identity_changed')
+        self.assertEqual(caught.exception.diagnostic, {'kind': 'host_key_mismatch'})
+        self.assertNotIn('A' * 43, json.dumps(caught.exception.result()))
 
     def test_ssh_unreachable_and_permission(self):
         self.prepare()
-        for status in (255, 2):
+        cases = ((255, 'unreachable', 'handshake_failed'), (2, 'integrity_failure', 'jsonl_read_failed'))
+        for status, category, kind in cases:
             with self.subTest(status=status), patch.object(self.mod.subprocess, 'run',
                     return_value=subprocess.CompletedProcess([], status, b'', b'PRIVATE')):
                 with self.assertRaises(self.mod.Blocked) as caught:
                     self.mod.read_final_candidates('100.84.23.115', 'box', self.TASK)
-                self.assertEqual(caught.exception.category, 'unreachable')
-                self.assertNotIn('PRIVATE', str(caught.exception.result()))
+                self.assertEqual(caught.exception.category, category)
+                self.assertEqual(caught.exception.diagnostic, {'kind': kind})
+                rendered = json.dumps(caught.exception.result())
+                self.assertNotIn('PRIVATE', rendered)
+                if kind == 'jsonl_read_failed':
+                    self.assertNotIn('unreachable', rendered)
+
+    def test_ssh_failure_kinds_do_not_leak_remote_text(self):
+        self.prepare()
+        leak = b'PRIVATE-STDERR SHA256:LEAKKEYMATERIAL'
+        cases = (
+            ('timeout', subprocess.TimeoutExpired(['ssh', 'PRIVATE-STDERR'], 60), 'unreachable', 'timeout'),
+            ('oserror', OSError('PRIVATE-STDERR'), 'unreachable', 'handshake_failed'),
+            ('refused', subprocess.CompletedProcess([], 255, leak, leak + b' Connection refused'),
+             'unreachable', 'handshake_failed'),
+            ('hostkey', subprocess.CompletedProcess([], 255, leak, leak + b'\nHost key verification failed.\n'),
+             'identity_changed', 'host_key_mismatch'),
+            ('changed', subprocess.CompletedProcess([], 255, leak,
+             b'WARNING: REMOTE HOST IDENTIFICATION HAS CHANGED!\n' + leak),
+             'identity_changed', 'host_key_mismatch'),
+            ('unknown-host', subprocess.CompletedProcess([], 255, leak,
+             b'No ED25519 host key is known for example and you have requested strict checking.\n' + leak),
+             'identity_changed', 'host_key_mismatch'),
+            ('search', subprocess.CompletedProcess([], 2, leak, leak), 'integrity_failure', 'jsonl_read_failed'),
+            ('changing', subprocess.CompletedProcess([], 3, leak, leak), 'integrity_failure', 'jsonl_read_failed'),
+            ('parse', subprocess.CompletedProcess([], 0, b'not-json ' + leak, leak),
+             'integrity_failure', 'jsonl_read_failed'),
+            ('not-list', subprocess.CompletedProcess([], 0, b'{}', leak), 'integrity_failure', 'jsonl_read_failed'),
+        )
+        for name, outcome, category, kind in cases:
+            with self.subTest(name=name):
+                kwargs = {'side_effect': outcome} if isinstance(outcome, BaseException) else {'return_value': outcome}
+                with patch.object(self.mod.subprocess, 'run', **kwargs) as run:
+                    with self.assertRaises(self.mod.Blocked) as caught:
+                        self.mod.read_final_candidates('100.84.23.115', 'box', self.TASK)
+                command = run.call_args.args[0]
+                for option in ('BatchMode=yes', 'StrictHostKeyChecking=yes', 'UpdateHostKeys=no'):
+                    self.assertIn(option, command)
+                result = caught.exception.result()
+                self.assertEqual(result['category'], category)
+                self.assertEqual(result['diagnostic'], {'kind': kind})
+                rendered = json.dumps(result)
+                self.assertNotIn('PRIVATE-STDERR', rendered)
+                self.assertNotIn('LEAKKEYMATERIAL', rendered)
+                self.assertNotIn('not-json', rendered)
+                if kind == 'jsonl_read_failed':
+                    self.assertNotIn('unreachable', rendered)
+                    self.assertNotIn('SSH', caught.exception.detail)
+                self.assertFalse(Path(str(self.out) + '.txt').exists())
+                self.assertEqual((self.state / 'bindings.json').read_bytes(), self.before)
 
     def test_remote_projection_executes_on_isolated_jsonl(self):
         self.prepare()

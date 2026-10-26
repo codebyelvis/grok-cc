@@ -2,6 +2,12 @@
 
 作者：elvis。
 
+## 0.1.0.dev8 — 2026-10-26
+
+- recover-final-reply 用 `diagnostic.kind` 区分 `timeout`、`handshake_failed`、`host_key_mismatch`、`jsonl_read_failed`。
+- 主机密钥验证失败记为 `identity_changed`。SSH 已结束但搜索、权限或 JSONL 解析失败记为 `integrity_failure`，不再称为 SSH 不可达。
+- 结果不回传远端 stderr、主机钥或命令输出，不改 known_hosts。屏幕片段仍不能批准。真实远端回收未验收，active Skill 未更新。
+
 ## 0.1.0.dev7 — 2026-10-24
 
 - 新增 recover-final-reply：只读回收当前 bound、accepted 任务的 Claude 原生 JSONL 最终助手 text，保留正文原字节和来源元数据。

@@ -1188,6 +1188,27 @@ print(json.dumps(result, ensure_ascii=False))
 '''
 
 
+_HOST_KEY_FAILURE_MARKERS = (
+    b'host key verification failed',
+    b'remote host identification has changed',
+    b'no ed25519 host key is known',
+    b'offending key',
+)
+
+
+def _recovery_ssh_blocked(category, detail, kind):
+    return Blocked(category, detail, diagnostic={'kind': kind})
+
+
+def _host_key_verification_failed(stderr):
+    if isinstance(stderr, str):
+        stderr = stderr.encode('utf-8', 'replace')
+    if not isinstance(stderr, (bytes, bytearray)):
+        return False
+    lowered = bytes(stderr).lower()
+    return any(marker in lowered for marker in _HOST_KEY_FAILURE_MARKERS)
+
+
 def read_final_candidates(host, user, task_id, expected_host_fp=None):
     """Strict known_hosts remains authoritative even when a fingerprint is supplied."""
     if (not isinstance(host, str) or not re.fullmatch(r'[A-Za-z0-9][A-Za-z0-9.-]{0,252}', host)
@@ -1203,11 +1224,12 @@ def read_final_candidates(host, user, task_id, expected_host_fp=None):
             keys = {line.split()[2] for line in scan.stdout.splitlines()
                     if len(line.split()) == 3 and line.split()[1] == b'ssh-ed25519'}
             if scan.returncode or not keys:
-                raise Blocked('unreachable', 'Cannot read host key; known_hosts unchanged')
+                raise _recovery_ssh_blocked('unreachable', 'Cannot read host key; known_hosts unchanged', 'handshake_failed')
             fps = {'SHA256:' + base64.b64encode(hashlib.sha256(base64.b64decode(k, validate=True)).digest()).decode().rstrip('=')
                    for k in keys}
             if fps != {expected_host_fp}:
-                raise Blocked('identity_changed', 'SSH host fingerprint differs; known_hosts unchanged')
+                raise _recovery_ssh_blocked('identity_changed', 'SSH host fingerprint differs; known_hosts unchanged',
+                                            'host_key_mismatch')
         command = ['ssh', '-v', '-T', '-o', 'BatchMode=yes', '-o', 'StrictHostKeyChecking=yes',
                    '-o', 'UpdateHostKeys=no', '-o', 'ConnectTimeout=10',
                    '-o', 'ControlMaster=no', '-o', 'ControlPath=none',
@@ -1217,26 +1239,36 @@ def read_final_candidates(host, user, task_id, expected_host_fp=None):
                                          + 'except PermissionError:\n    sys.exit(2)\n').encode(), capture_output=True, timeout=60)
     except Blocked:
         raise
-    except (OSError, subprocess.TimeoutExpired):
-        raise Blocked('unreachable', 'SSH unavailable; preserve host keys and binding') from None
+    except subprocess.TimeoutExpired:
+        raise _recovery_ssh_blocked('unreachable', 'SSH timed out; preserve host keys and binding', 'timeout') from None
+    except OSError:
+        raise _recovery_ssh_blocked('unreachable', 'SSH unavailable; preserve host keys and binding',
+                                    'handshake_failed') from None
     except (ValueError, TypeError):
-        raise Blocked('integrity_failure', 'Invalid remote host key evidence') from None
+        raise _recovery_ssh_blocked('identity_changed', 'Invalid remote host key evidence', 'host_key_mismatch') from None
     if response.returncode == 255:
-        raise Blocked('unreachable', 'SSH connection/authentication/known_hosts failed; no automatic repair')
+        if _host_key_verification_failed(response.stderr):
+            raise _recovery_ssh_blocked('identity_changed', 'SSH host key verification failed; known_hosts unchanged',
+                                        'host_key_mismatch')
+        raise _recovery_ssh_blocked('unreachable', 'SSH connection/authentication failed; no automatic repair',
+                                    'handshake_failed')
     if expected_host_fp:
-        actual = re.findall(rb'Server host key: ssh-ed25519 (SHA256:[A-Za-z0-9+/]{43})(?:\s|$)', response.stderr)
+        actual = re.findall(rb'Server host key: ssh-ed25519 (SHA256:[A-Za-z0-9+/]{43})(?:\s|$)', response.stderr or b'')
         if not actual or set(actual) != {expected_host_fp.encode()}:
-            raise Blocked('identity_changed', 'SSH handshake fingerprint is unverified or changed; nothing exported')
+            raise _recovery_ssh_blocked('identity_changed',
+                                        'SSH handshake fingerprint is unverified or changed; nothing exported',
+                                        'host_key_mismatch')
     if response.returncode == 2:
-        raise Blocked('unreachable', 'Remote search or file permissions unavailable')
+        raise _recovery_ssh_blocked('integrity_failure', 'Remote search or file permissions unavailable', 'jsonl_read_failed')
     if response.returncode:
-        raise Blocked('integrity_failure', 'Remote JSONL unavailable, changing or malformed')
+        raise _recovery_ssh_blocked('integrity_failure', 'Remote JSONL unavailable, changing or malformed',
+                                    'jsonl_read_failed')
     try:
         value = json.loads(response.stdout)
     except (ValueError, UnicodeError):
-        raise Blocked('integrity_failure', 'Invalid remote JSONL projection') from None
+        raise _recovery_ssh_blocked('integrity_failure', 'Invalid remote JSONL projection', 'jsonl_read_failed') from None
     if not isinstance(value, list):
-        raise Blocked('integrity_failure', 'Invalid remote candidate list')
+        raise _recovery_ssh_blocked('integrity_failure', 'Invalid remote candidate list', 'jsonl_read_failed')
     return value
 
 
