@@ -1146,6 +1146,29 @@ class BindingManager:
             db.save()
             return self._view(row)
 
+    @_command
+    def wait(self, task_id=None, timeout_s=None):
+        budget = timeout_s if timeout_s is not None else self.retry_budget_s
+        deadline = time.monotonic() + budget if budget > 0 else None
+        while True:
+            row = copy.deepcopy(Registry.inspect(self.state)['bindings'].get(self.key))
+            self._destination(row)
+            if row.get('state') != 'bound':
+                raise Blocked('integrity_failure', 'No bound instance; consult ensure')
+            if task_id and task_id not in row.get('tasks', {}):
+                raise Blocked('invalid_input', 'Task not found in binding records')
+            try:
+                self._idle(row)
+                return {'action': 'idle', 'binding': self._view(row),
+                        'handle': row['handle'], 'task_id': task_id or row.get('active_task')}
+            except Blocked as exc:
+                if exc.category == 'busy':
+                    if deadline is not None and time.monotonic() >= deadline:
+                        raise Blocked('busy', 'Timed out waiting for CC to become idle', True)
+                    time.sleep(min(1.0, max(0.1, (deadline - time.monotonic()) if deadline else 0.5)))
+                    continue
+                raise
+
 
 # Read-only recovery deliberately lives outside BindingManager: no registry locks or Orca calls.
 RECOVER_REMOTE = r'''
@@ -1562,7 +1585,7 @@ def main():
     manager = None
     try:
         parser = SafeParser(description=__doc__)
-        parser.add_argument('command', choices=['ensure', 'create', 'send', 'finish', 'identity', 'reconcile', 'rebind', 'recover-final-reply'])
+        parser.add_argument('command', choices=['ensure', 'create', 'send', 'finish', 'identity', 'reconcile', 'rebind', 'wait', 'recover-final-reply'])
         parser.add_argument('--controller', choices=list(CONTROLLERS))
         parser.add_argument('--session-id')
         parser.add_argument('--project-root')
@@ -1606,6 +1629,19 @@ def main():
                                          args.ssh_host or '100.84.23.115', args.ssh_user or 'box',
                                          args.out, args.expected_host_fp)
         else:
+            key = owner_key(owner)
+            snapshot = Registry.inspect(args.state_dir)['bindings'].get(key)
+            if not args.project_root:
+                if snapshot and snapshot.get('project'):
+                    args.project_root = snapshot['project']
+                elif Path.cwd().is_dir():
+                    args.project_root = str(Path.cwd().resolve())
+            if not args.worktree:
+                if snapshot and snapshot.get('worktree'):
+                    args.worktree = snapshot['worktree']
+            if not args.environment or args.environment == 'Grok Bot':
+                if snapshot and snapshot.get('environment'):
+                    args.environment = snapshot['environment']
             if not args.project_root or not args.worktree:
                 raise Blocked('invalid_input', 'Need project-root and explicit cloud worktree')
             manager = BindingManager(args.state_dir, owner, args.project_root, args.environment,
@@ -1616,6 +1652,8 @@ def main():
                 result = manager.create(confirm=args.confirm, retry_launch=args.retry_launch)
             elif args.command == 'rebind':
                 result = manager.rebind(args.confirm_handle, args.confirm_incarnation)
+            elif args.command == 'wait':
+                result = manager.wait(args.task_id, timeout_s=args.retry_budget_s)
             else:
                 if not args.task_id:
                     raise Blocked('invalid_input', 'Need task-id')

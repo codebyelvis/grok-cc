@@ -388,6 +388,17 @@ def extract_patch(tid, reply, allow_unhashed=False):
             if not has_metadata(block):
                 legacy.append('\n'.join(block) + '\n')
                 continue
+            if len(block) == 2:
+                m_sha = re.fullmatch(r'PATCH_SHA256 ([0-9a-f]{64})', block[0].removesuffix('\r'))
+                m_lines = re.fullmatch(r'PATCH_LINES ([0-9]{1,9})', block[1].removesuffix('\r'))
+                if not m_sha or not m_lines:
+                    raise ValueError('Malformed patch integrity metadata')
+                digest = m_sha.group(1)
+                count = int(m_lines.group(1))
+                if count != 0 or digest != hashlib.sha256(b'').hexdigest():
+                    raise ValueError('Empty patch must have 0 lines and sha256 of empty bytes')
+                hashed.append('')
+                continue
             if (len(block) < 3 or not re.fullmatch(r'PATCH_SHA256 [0-9a-f]{64}', block[-2].removesuffix('\r'))
                     or not re.fullmatch(r'PATCH_LINES [0-9]{1,9}', block[-1].removesuffix('\r'))):
                 raise ValueError('Malformed patch integrity metadata')
@@ -411,6 +422,9 @@ def extract_patch(tid, reply, allow_unhashed=False):
 def check(manifest, reply, allow_unhashed=False):
     root = validate_packet(manifest)
     diff = extract_patch(manifest['task_id'], reply, allow_unhashed)
+    if diff == '':
+        verify_baseline(root, manifest['files'])
+        return ''
     if len(diff.encode('utf-8')) > MAX_TOTAL or '\0' in diff:
         raise ValueError('Oversized or binary patch')
     touched = diff_paths(diff)

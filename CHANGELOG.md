@@ -2,6 +2,13 @@
 
 作者：elvis。
 
+## 0.1.0.dev12 — 2026-10-27
+
+- task_packet check 支持零变更空补丁：PATCH_LINES 为 0 且摘要为空字节 SHA256 时判定基线一致放行，输出 0 字节补丁，不误报 metadata 异常。
+- session_binding 支持参数自动继承：已有 bound 绑定时，`send`、`reconcile`、`finish`、`wait` 可省略 `--worktree`、`--environment` 与 `--project-root`，自动继承已保存的绑定记录；`--project-root` 缺省时回退至当前工程目录。
+- 新增 session_binding `wait` 命令：支持阻塞等待 bound CC 终端执行完毕并恢复 `tui-idle`，超时返回 busy。
+- 扩充单元测试回归，套件从 188 项增至 193 项且全部通过。
+
 ## 0.1.0.dev11 — 2026-10-26
 
 - recover 投影瘦身：user 文本只留 `grok-cc-msg:` 或 task_id 窗口，并附原文 `prompt_sha256`；assistant 只保留 end_turn 全文。

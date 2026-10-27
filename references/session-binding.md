@@ -10,9 +10,12 @@
 ```text
 python3 <skill-dir>/scripts/session_binding.py identity --controller codex
 python3 <skill-dir>/scripts/session_binding.py send <相同参数> --task-id <task_id> --text-file <项目外已审查prompt>
+python3 <skill-dir>/scripts/session_binding.py wait <相同参数> [--task-id <task_id>] [--retry-budget-s 300]
 python3 <skill-dir>/scripts/session_binding.py reconcile <相同参数> --task-id <task_id> [--message-id main]
 python3 <skill-dir>/scripts/session_binding.py finish <相同参数> --task-id <task_id>
 ```
+
+已有持久 bound 绑定时，`send`、`wait`、`reconcile`、`finish` 可省略 `--worktree`、`--environment` 与 `--project-root`，自动继承已绑定的云端目标与工程根目录。`wait` 子命令阻塞轮询 `tui-idle` 直至当前执行完成。
 
 正常运行持续复用默认共享状态目录`~/.local/state/grok-cc`，不能另建state-dir绕过约束；开发回归仅用临时`--state-dir`及Orca替身，不操作真实共享目录。状态是本helper的私有数据，不是Claude/Codex原生配置，不同步远端。只保留绑定/任务摘要、cursor、意图、尝试次数和白名单回执，不保存源码prompt、屏幕正文或原始诊断。
 

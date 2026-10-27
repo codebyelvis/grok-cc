@@ -1950,6 +1950,33 @@ while time.monotonic()<deadline and not (p/'release-child').exists(): time.sleep
         with self.assertRaises(self.mod.Blocked) as caught: m.ensure()
         self.assertEqual(caught.exception.category, 'identity_changed')
 
+    def test_wait_returns_idle_when_cc_is_idle(self):
+        m = self.manager()
+        first = m.create(confirm=True)
+        res = m.wait(timeout_s=0.5)
+        self.assertEqual(res['action'], 'idle')
+        self.assertEqual(res['handle'], first['handle'])
+
+    def test_wait_times_out_when_busy(self):
+        m = self.manager()
+        m.create(confirm=True)
+        self.remote.busy = True
+        with self.assertRaises(self.mod.Blocked) as caught:
+            m.wait(timeout_s=0.1)
+        self.assertEqual(caught.exception.category, 'busy')
+
+    def test_cli_auto_resolution_inherits_worktree_and_project(self):
+        m = self.manager(owner=OWNER_G)
+        first = m.create(confirm=True)
+        stdout = io.StringIO()
+        with patch.object(sys, 'argv', ['session_binding', 'ensure',
+                                        '--controller', 'grok', '--session-id', OWNER_G['session_id'],
+                                        '--state-dir', str(self.state)]), \
+             patch('sys.stdout', stdout), patch.object(self.mod, 'NativeOrca', return_value=self.remote):
+            self.assertEqual(self.mod.main(), 0)
+        res = json.loads(stdout.getvalue())
+        self.assertEqual(res['handle'], first['handle'])
+
     def test_clipped_read_cannot_reconcile_even_saved_receipt(self):
         m = self.manager(); m.create(confirm=True); m.send('task-one', 'main', 'text')
         self.change_row(lambda row: row['tasks']['task-one']['messages']['main'].update(state='sending'))

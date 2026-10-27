@@ -28,7 +28,7 @@ class PacketTests(unittest.TestCase):
         self.tmp.cleanup()
     def wrap(self, diff=None, task_id=None):
         tid=task_id or self.manifest['task_id']
-        diff = diff or self.diff
+        diff = self.diff if diff is None else diff
         digest = hashlib.sha256(diff.encode('utf-8')).hexdigest()
         count = diff.count('\n')
         return f'BEGIN_PATCH {tid}\n{diff}PATCH_SHA256 {digest}\nPATCH_LINES {count}\nEND_PATCH {tid}\n'
@@ -40,6 +40,26 @@ class PacketTests(unittest.TestCase):
         self.assertEqual(packet.check(self.manifest, self.wrap()), self.diff)
         self.assertEqual((self.root/'a.py').read_text(), 'value = 1\n')
         self.assertEqual((self.root/'unrelated.txt').read_text(), 'user draft\n')
+    def test_empty_patch_checks_and_validates_baseline(self):
+        empty_reply = self.wrap('')
+        self.assertEqual(packet.check(self.manifest, empty_reply), '')
+        self.assertEqual((self.root/'a.py').read_text(), 'value = 1\n')
+        (self.root/'a.py').write_text('value = 99\n')
+        with self.assertRaises(ValueError): packet.check(self.manifest, empty_reply)
+        (self.root/'a.py').write_text('value = 1\n')
+    def test_empty_patch_cli_check_writes_zero_byte_file(self):
+        with tempfile.TemporaryDirectory() as external:
+            packet_path = Path(external).resolve() / 'packet.json'
+            reply_path = Path(external).resolve() / 'reply.txt'
+            out_patch = Path(external).resolve() / 'checked.patch'
+            packet_path.write_text(json.dumps(self.manifest))
+            reply_path.write_text(self.wrap(''))
+            args = [sys.executable, str(SOURCE), 'check', '--packet', str(packet_path),
+                    '--reply', str(reply_path), '--out', str(out_patch)]
+            result = subprocess.run(args, capture_output=True, text=True)
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertTrue(out_patch.is_file())
+            self.assertEqual(out_patch.read_bytes(), b'')
     def test_check_denies_changed_baseline(self):
         (self.root/'a.py').write_text('value = 77\n')
         with self.assertRaises(ValueError): packet.check(self.manifest, self.wrap())

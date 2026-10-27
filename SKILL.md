@@ -46,7 +46,7 @@ orca terminal list --environment 'Grok Bot' --json
 python3 <skill-dir>/scripts/session_binding.py send --controller <codex|claudex|grok> --session-id <真实ID> --project-root <Mac根目录> --environment 'Grok Bot' --worktree <已发现完整云端worktreeID> --orca <本次选定可执行文件> --task-id <当前ID> --text-file <项目外已审查prompt.txt>
 ```
 
-已知精确绑定及同一目标参数时直接send；它自带身份、空闲、auto和草稿核验，无需先ensure。ensure保留为可选只读诊断，不创建。无绑定或旧实例确实消失时，先用以下无confirm命令展示同项目目标及claude/auto/位置计划，等待用户明确选择换绑或新建；有现成任务也不能跳过选择：
+已知精确绑定及同一目标参数时直接send；已有持久 bound 绑定时，`send`、`reconcile`、`finish`、`wait` 可省略 `--worktree`、`--environment` 与 `--project-root`，自动继承已绑定的云端目标；`python3 <skill-dir>/scripts/session_binding.py wait --task-id <ID>` 可阻塞等待 bound CC 完成当前执行并恢复 `tui-idle`。send 自带身份、空闲、auto和草稿核验，无需先ensure。ensure保留为可选只读诊断，不创建。无绑定或旧实例确实消失时，先用以下无confirm命令展示同项目目标及claude/auto/位置计划，等待用户明确选择换绑或新建；有现成任务也不能跳过选择：
 
 ```text
 python3 <skill-dir>/scripts/session_binding.py create <同一组会话与目标参数> --project <已发现完整云端worktreeID>
@@ -76,7 +76,7 @@ main已accepted、无unknown且有剩余次数时，仅经用户明确要求，�
 python3 <skill-dir>/scripts/task_packet.py check --packet <原packet.json> --reply <完整原字节reply.txt> --out <项目外>/checked.patch
 ```
 
-check不改项目；默认核对唯一有效hashed产物、原字节SHA/LF数、白名单、所有选定文件基线/新增缺席、路径/symlink、hunk及真实git apply --check。旧无hash回复只能显式`--allow-unhashed`，不能挽救损坏hashed块。只支持UTF-8文本修改/新增，不支持删除/重命名/二进制/权限变更/空白文件名。
+check不改项目；默认核对唯一有效hashed产物、原字节SHA/LF数、白名单、所有选定文件基线/新增缺席、路径/symlink、hunk及真实git apply --check（空补丁合法，0 行且为空 SHA 时核验基线通过并输出 0 字节补丁）。旧无hash回复只能显式`--allow-unhashed`，不能挽救损坏hashed块。只支持UTF-8文本修改/新增，不支持删除/重命名/二进制/权限变更/空白文件名。
 
 审读补丁与源码，应用前用新输出名重新check；基线漂移先协调，不reset/force或覆盖本地用户文件。再用标准git apply应用checked.patch，运行Mac项目所需测试及独立Review；云端PASS和hash都不是Mac业务验收。未经授权不暂存/提交/推送。
 

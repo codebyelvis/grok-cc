@@ -1,13 +1,13 @@
 {
-  "version": "0.1.0.dev11",
+  "version": "0.1.0.dev12",
   "files": {
-    "SKILL.md": "52b85d626da0f4ff1f57c0de226fc6ef2cadf5575dfa135e16f5339acccc2c87",
+    "SKILL.md": "5f57cd2ed3c07e48363674da35fd219eb8eaed0083b42693f7e76d9e8cfb9706",
     "agents/openai.yaml": "a6b5b9c379e42c86b6bf0d8ed127a7f0d5a816f420512a4f31d103b8baf774c1",
     "references/final-patch-prompt.md": "b14117cb8690878e7a148b8c905007e22889b3b5d848d15d9ebe24fe6d38d5ea",
-    "references/session-binding.md": "78c8e8382daee5d51a546fa1b618d0e9bfa055038a06cb239f03736becc15f8f",
-    "scripts/session_binding.py": "3bf667c64be253d0054d0205bb99b06e2c64560d9dd0585112585cabfe1ac4da",
-    "scripts/task_packet.py": "180893813d5c99aaf0fd1cf6f850a39cdba1cda016730e8faf94df99c9d46f64",
-    "scripts/tests/test_session_binding.py": "b36fb5858652dd669b31c355fc9e27406f423a98b23ed85f3fd256922a17c8b1",
-    "scripts/tests/test_task_packet.py": "ea9e0fc84f0469b0d4d9e92e43cdaec9e09f8de59d465f118f2e09a2219439a5"
+    "references/session-binding.md": "00957f6f54a26c4327b98c48c0e307819bc660f2faacb3a5ac1e172cc1f98e98",
+    "scripts/session_binding.py": "637f521fb48491967b9ba697e3efc9fbc1ae23419026e0477a0efd3f5f1de95d",
+    "scripts/task_packet.py": "6edae2d9d736e606e81a9bc898b7efb7489f53ff85871db779c620b040738bea",
+    "scripts/tests/test_session_binding.py": "7b64b64472b92b53d99b166b0b7ca0672f16be654618cd2bd48d4cbbaa1b79cf",
+    "scripts/tests/test_task_packet.py": "7ce27ac8fd98c77ad5d6d1ba8bacb1090399ca68db9800e2ef5ba5790ee95c22"
   }
 }
