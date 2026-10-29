@@ -53,6 +53,8 @@ CLAUDE_EMPTY_PLACEHOLDERS = frozenset('Try "' + hint + '"' for hint in (
     'fix lint errors', 'fix typecheck errors', 'how does <filepath> work?', 'refactor <filepath>',
     'how do I log an error?', 'edit <filepath> to...', 'write a test for <filepath>',
     'create a util logging.py that...'))
+TUI_CLEAR_LINE_SLACK = 8
+TUI_CLEAR_MAX_LINES = 40
 # Orca `agent launch` applies global agentDefaultArgs.claude
 # (--dangerously-skip-permissions). This per-instance path uses the public
 # `terminal create --command`; never bare `claude`, which Orca rewrites to its agent default.
@@ -61,6 +63,18 @@ AUTO_LAUNCH_COMMAND = 'claude --permission-mode auto'
 NEW_CREATE_PROTOCOL = AUTO_LAUNCH_PROTOCOL  # new reservations only; saved agent.launch.v2 rows keep their protocol
 LAUNCH_CAPABILITIES = frozenset(('agent.launch.v2', 'agent.launch.replay-required.v1',
                                 'agent.launch.local-presentation.v1'))
+
+
+def _draft_diagnostic(draft):
+    """Only metadata crosses the boundary; logical lines follow Orca, not visual wraps."""
+    if draft is None:
+        draft = ''
+    if not isinstance(draft, str):
+        raise Blocked('integrity_failure', 'Invalid native draft field; preserve input')
+    data = draft.encode('utf-8')
+    return {'draft_present': bool(draft),
+            'draft_lines': len(re.split(r'\r\n|\r|\n', draft)) if draft else 0,
+            'draft_bytes': len(data), 'draft_sha256': hashlib.sha256(data).hexdigest()}
 
 
 def _operation_id(value):
@@ -896,7 +910,7 @@ class BindingManager:
             db.save()  # Reservation is durable before the single, non-retried create.
         return self._complete_creation(self._launch_call(row))
 
-    def _idle(self, row, allow_hint=True):
+    def _wait_idle(self, row):
         wait = self._call(['terminal', 'wait', '--terminal', row['handle'], '--for', 'tui-idle',
                           '--timeout-ms', '1000'])
         status = wait['result'].get('wait')
@@ -906,22 +920,28 @@ class BindingManager:
             raise Blocked('identity_changed', 'Runtime changed while waiting; retain binding')
         if status['satisfied'] is not True:
             raise Blocked('busy', 'Bound CC busy; wait on this terminal, do not create another', True)
-        stream = self._call(['terminal', 'read', '--terminal', row['handle'], '--limit', '1'])
+
+    def _input_screen(self, row):
         screen = self._call(['terminal', 'read', '--terminal', row['handle'], '--screen'])
-        if any(r['_meta']['runtimeId'] != row['runtime'] for r in (stream, screen)):
+        if screen['_meta']['runtimeId'] != row['runtime']:
             raise Blocked('identity_changed', 'Runtime changed while checking input')
-        stream_terminal = stream['result'].get('terminal')
         terminal = screen['result'].get('terminal')
-        if not isinstance(stream_terminal, dict) or not isinstance(terminal, dict):
+        if not isinstance(terminal, dict):
             raise Blocked('integrity_failure', 'Invalid native read response; do not send')
-        if stream_terminal.get('handle') != row['handle']:
-            raise Blocked('identity_changed', 'Stream destination changed; do not send')
+        if terminal.get('handle') != row['handle']:
+            raise Blocked('identity_changed', 'Screen destination changed; preserve input')
         tail = terminal.get('tail')
         if not isinstance(tail, list) or not all(isinstance(line, str) for line in tail):
             raise Blocked('integrity_failure', 'Invalid native screen lines; preserve input')
-        if (terminal.get('handle') != row['handle'] or terminal.get('source') != 'screen'
-                or terminal.get('draft') or terminal.get('truncated') or terminal.get('limited')):
-            raise ValueError('Input screen/draft cannot be verified')
+        if (terminal.get('source') != 'screen' or terminal.get('truncated') is not False
+                or terminal.get('limited') is not False):
+            raise Blocked('integrity_failure', 'Input screen cannot be verified; preserve input')
+        _draft_diagnostic(terminal.get('draft'))  # Reject malformed falsey fields too.
+        return terminal
+
+    @staticmethod
+    def _composer_content(terminal):
+        tail = terminal['tail']
         separators = [i for i, line in enumerate(tail) if re.fullmatch('[─━]{3,}', line.strip())]
         if len(separators) < 2:
             raise ValueError('Cannot identify the bound CC composer')
@@ -934,7 +954,24 @@ class BindingManager:
         # Normalize only that delimiter, never arbitrary draft content.
         if not composer.startswith('❯'):
             raise ValueError('Cannot identify the bound CC input prompt')
-        content = composer[1:].lstrip()
+        return composer[1:].lstrip()
+
+    def _idle(self, row, allow_hint=True):
+        self._wait_idle(row)
+        stream = self._call(['terminal', 'read', '--terminal', row['handle'], '--limit', '1'])
+        if stream['_meta']['runtimeId'] != row['runtime']:
+            raise Blocked('identity_changed', 'Runtime changed while checking input')
+        stream_terminal = stream['result'].get('terminal')
+        if not isinstance(stream_terminal, dict):
+            raise Blocked('integrity_failure', 'Invalid native read response; do not send')
+        if stream_terminal.get('handle') != row['handle']:
+            raise Blocked('identity_changed', 'Stream destination changed; do not send')
+        terminal = self._input_screen(row)
+        if terminal.get('draft'):
+            raise Blocked('nonempty_draft',
+                'Nonempty draft preserved; explicit user authorization is required before clear-draft --confirm',
+                diagnostic=_draft_diagnostic(terminal['draft']))
+        content = self._composer_content(terminal)
         allowed = {''}
         if allow_hint and not row['tasks']:
             # Reject any reported `draft` above; screen matching is only a heuristic.
@@ -948,6 +985,75 @@ class BindingManager:
             raise Blocked('integrity_failure', 'Native pre-send cursor unavailable')
         self._verify(row)
         return cursor
+
+    @_command
+    def clear_draft(self, confirm=False):
+        snapshot = copy.deepcopy(Registry.inspect(self.state)['bindings'].get(self.key))
+        if snapshot is None:
+            raise Blocked('invalid_input', 'No binding; draft inspection cannot create or claim a terminal')
+        self._destination(snapshot)
+        if snapshot.get('state') != 'bound':
+            raise Blocked('uncertain_send', 'Creation outcome uncertain; preserve intent and input')
+        if confirm:
+            snapshot = self._snapshot()
+            if any(m['state'] != 'accepted' for task in snapshot['tasks'].values() for m in task['messages'].values()):
+                raise Blocked('uncertain_send', 'Unresolved message remains; preserve intent and input')
+        self._verify(snapshot)
+        if confirm:
+            self._wait_idle(snapshot)
+        terminal = self._input_screen(snapshot)
+        if not confirm:
+            self._verify(snapshot)
+            if Registry.inspect(self.state)['bindings'].get(self.key) != snapshot:
+                raise Blocked('busy', 'Binding changed during draft inspection; preserve current state')
+            return {'action': 'draft-inspected', 'binding': self._view(snapshot),
+                    'diagnostic': _draft_diagnostic(terminal.get('draft'))}
+
+        try:
+            return self._clear_confirmed(snapshot, terminal)
+        except Blocked as exc:
+            # Read retries are safe; restarting a clear after unknown read-back is not.
+            exc.retryable = False
+            raise
+
+    def _clear_confirmed(self, snapshot, terminal):
+        for attempt in range(3):
+            diagnostic = _draft_diagnostic(terminal.get('draft'))
+            try:
+                content = self._composer_content(terminal)
+            except ValueError:
+                raise Blocked('integrity_failure', 'Composer or auto mode cannot be verified; preserve input') from None
+            self._verify(snapshot)
+            with Registry(self.state) as db:
+                self._unchanged(db, snapshot)
+            if not diagnostic['draft_present']:
+                if content not in {''} | CLAUDE_EMPTY_PLACEHOLDERS:
+                    raise Blocked('sticky_draft', 'Composer remains nonempty or ambiguous; stop and preserve input',
+                                  diagnostic=diagnostic)
+                return {'action': 'draft-cleared' if attempt else 'draft-already-clear',
+                        'binding': self._view(snapshot), 'clear_attempts': attempt, 'diagnostic': diagnostic}
+            if attempt == 2:
+                raise Blocked('sticky_draft', 'Draft remains after two clears; stop and preserve input and binding',
+                              diagnostic=diagnostic)
+            lines = (min(TUI_CLEAR_MAX_LINES, max(1, diagnostic['draft_lines'] + TUI_CLEAR_LINE_SLACK))
+                     if attempt == 0 else TUI_CLEAR_MAX_LINES)
+            repetitions = 2 * lines - 1
+            # Orca requires its own write: bundling controls with a body can paste them literally.
+            burst = '\x15' * repetitions + '\x0b' * repetitions
+            try:
+                result = self._call(['terminal', 'send', '--terminal', snapshot['handle'], '--text', burst])
+            except (ValueError, OSError, subprocess.TimeoutExpired):
+                raise Blocked('uncertain_send', 'Draft clear outcome unavailable; inspect input, do not blindly repeat') from None
+            send = result['result'].get('send')
+            if (result['_meta']['runtimeId'] != snapshot['runtime'] or
+                    (isinstance(send, dict) and 'handle' in send and send['handle'] != snapshot['handle'])):
+                raise Blocked('identity_changed', 'Draft clear destination changed; stop and retain binding')
+            if not isinstance(send, dict) or send.get('accepted') is not True:
+                raise Blocked('uncertain_send', 'Draft clear not confirmed accepted; inspect input, do not repeat')
+            # A second clear requires positive read-back evidence, never a lost write/read reply.
+            self._verify(snapshot)
+            self._wait_idle(snapshot)
+            terminal = self._input_screen(snapshot)
 
     @staticmethod
     def _attempts(task):
@@ -1585,7 +1691,7 @@ def main():
     manager = None
     try:
         parser = SafeParser(description=__doc__)
-        parser.add_argument('command', choices=['ensure', 'create', 'send', 'finish', 'identity', 'reconcile', 'rebind', 'wait', 'recover-final-reply'])
+        parser.add_argument('command', choices=['ensure', 'create', 'send', 'finish', 'clear-draft', 'identity', 'reconcile', 'rebind', 'wait', 'recover-final-reply'])
         parser.add_argument('--controller', choices=list(CONTROLLERS))
         parser.add_argument('--session-id')
         parser.add_argument('--project-root')
@@ -1612,8 +1718,12 @@ def main():
             raise Blocked('invalid_input', 'SSH/output arguments require recover-final-reply')
         if args.retry_request is not None:
             raise Blocked('unsupported_contract', 'Native request retry contract is unavailable')
-        if args.command != 'create' and (args.create_project is not None or args.confirm or args.retry_launch is not None):
-            raise Blocked('invalid_input', 'Project/confirm parameters require explicit create')
+        if args.command != 'create' and (args.create_project is not None or args.retry_launch is not None):
+            raise Blocked('invalid_input', 'Project/replay parameters require explicit create')
+        if args.confirm and args.command not in ('create', 'clear-draft'):
+            raise Blocked('invalid_input', 'Confirm requires explicit create or clear-draft')
+        if args.command == 'clear-draft' and args.text_file is not None:
+            raise Blocked('invalid_input', 'Draft clearing cannot include a prompt body')
         if args.retry_launch is not None and not args.confirm:
             raise Blocked('invalid_input', 'Native launch replay requires explicit confirm')
         if args.command == 'create':
@@ -1650,6 +1760,8 @@ def main():
                 result = manager.ensure()
             elif args.command == 'create':
                 result = manager.create(confirm=args.confirm, retry_launch=args.retry_launch)
+            elif args.command == 'clear-draft':
+                result = manager.clear_draft(confirm=args.confirm)
             elif args.command == 'rebind':
                 result = manager.rebind(args.confirm_handle, args.confirm_incarnation)
             elif args.command == 'wait':

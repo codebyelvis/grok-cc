@@ -31,7 +31,7 @@ send按原字节解码已审查UTF-8 prompt，不转换CR/CRLF。prepare/render�
 python3 <skill-dir>/scripts/session_binding.py create <相同会话与目标参数> --project <完整云端worktreeID>
 ```
 
-`--project`为已发现的完整`repoId::path`，可带`id:`前缀；Mac根目录仍由`--project-root`指定。可选`--worktree`须与project相同；其他命令不接受project/confirm/retry-launch。无confirm只读现有registry、完整native list和status，返回claude/所需auto/精确worktree位置计划、至多20项白名单inventory、同项目总数及限量标记；不创建状态目录、lock、intent或终端，不按空闲程度认领目标。
+`--project`为已发现的完整`repoId::path`，可带`id:`前缀；Mac根目录仍由`--project-root`指定。可选`--worktree`须与project相同；其他命令不接受project/retry-launch，confirm仅用于create或clear-draft。create无confirm只读现有registry、完整native list和status，返回claude/所需auto/精确worktree位置计划、至多20项白名单inventory、同项目总数及限量标记；不创建状态目录、lock、intent或终端，不按空闲程度认领目标。
 
 只有用户明确选择该目标的新建后，才可执行同一命令加`--confirm`。确认时重新核对当前事实：无active任务、无未解决消息和creating；已有live绑定返回has_live_binding。替代创建须在相同runtime完整清单中证明原实例确已消失；列表缺页、缺失/重复handle、身份漂移、临时断连、busy或非auto都不能证明消失。不可达先等一至两分钟再核查原操作。
 
@@ -80,6 +80,31 @@ BLOCKED可返回diagnostic（本地枚举kind、started、有限returncode/timeo
 
 `finish`要求当前task无未知发送且原CC空闲，保留绑定及任务历史，返回project_pass=false；它只是释放派活占用，不是项目验收或清理。creating/unknown不能finish、重建、reset或delete。
 
+## 显式清理 sticky draft
+
+Orca `terminal read --screen` JSON 的独立 `draft` 字段优先于视觉 composer：屏幕只显示 `❯` 时仍可能存在真实键入草稿。不能凭视觉空白认定是 ghost，也不能自动清。`_idle` 因非空 draft 阻断 send/finish 时返回 `BLOCKED nonempty_draft`、`retryable=false`，提示须先取得用户明确授权。
+
+回执 `diagnostic` 只含 `draft_present`、`draft_lines`、`draft_bytes`、`draft_sha256`；无 draft 全文或 screen 正文，不将它们写入 registry。非空草稿逻辑行按 CRLF/CR/LF 分隔，末尾空行计入；视觉折行、Unicode 分隔符不另计。字节长度与 SHA256 基于原始 UTF-8；空草稿报 0 行/0 字节和空字节 SHA256。
+
+```text
+python3 <skill-dir>/scripts/session_binding.py clear-draft <相同会话与目标参数>
+python3 <skill-dir>/scripts/session_binding.py clear-draft <相同会话与目标参数> --confirm
+```
+
+仅操作已有 bound；可继承其 project-root/environment/worktree，无需 task-id。第一条为只读 `draft-inspected`，不创建 state/lock/intent、不 send。只有用户明确允许删除当前草稿后才可用第二条；这可能删除真实未发送文本，先由用户保留所需内容。此授权不等于换绑/创建/退役授权。
+
+确认后核验原 runtime/handle/incarnation、可写 Claude、idle、auto、screen 和 composer；busy 返回 `Blocked('busy')`，未决消息仍 `uncertain_send`，零 clear。draft 已空且 composer 合法时 `action=draft-already-clear`，零 send。非空时采用 [Orca 上游实现](https://github.com/stablyai/orca/blob/bbb3e7e5ee4a7c861d2f0e3a17b9b72be77d409d/src/shared/agent-tui-input-clear.ts)：`N=min(40,max(1,draft_lines+8))`，先 `2N−1` 次 Ctrl+U（U+0015），再同次数 Ctrl+K（U+000B）。最大 79+79 字节。
+
+**clear burst 必须单独一次 terminal.send，不带 Enter、正文或 wait-submit。** [上游修复说明](https://github.com/stablyai/orca/commit/bbb3e7e5ee4a7c861d2f0e3a17b9b72be77d409d)记录了与正文同一 write 会把 Ctrl+U 当字面文本粘入 prompt；单次 Ctrl+U 或 Ctrl+L 不能作为恢复保证。非提交回执不要求 requestId 或 input_accepted 模型阶段；必须明确 accepted、runtime 一致，回执若带 handle 也须一致，随后仍须读回验空。
+
+每次清理后重新验身份/idle/auto/screen；仅当 draft 空且 composer 为空或精确 `CLAUDE_EMPTY_PLACEHOLDERS` 时返回 `draft-cleared`。screen 的 `limited`、`truncated` 必须明确为布尔 `false`；缺失、null、0 或其他假值不能证明完整，也不能用于批准清理或报告验空。仍有 draft 才允许同一命令第二次最大 N=40 burst；两次后仍有 draft 返回不可自动重试的 `sticky_draft`，不做第三次。draft 空但 composer 残留同样阻断，不继续盲清。超时、未知/拒绝回执、读回不可用或身份变化立即停止，不因此补发最大 burst。清理开始后的失败一律 `retryable=false`：只读查询自身可以在预算内退避，不能把查询可重试提升为整个清理命令可自动重跑。命令不更改任务、次数、历史、权限或绑定，不 finish；真实用户或其他客户端的并发键入不受本地锁完全约束。
+
+| 现象 | 动作 |
+| --- | --- |
+| draft 空且 composer 合法 | 正常 send/finish，原先首次任务占位符限制仍生效 |
+| draft 非空 | BLOCKED nonempty_draft，保留真实草稿；用户确认后 clear-draft，再 ensure/send/finish |
+| clear-draft 两次仍粘 | 停下报告 sticky_draft；用户可选择关闭终端，再另行批准 retire-dead-binding 流程；本源码未实现该命令，不自动 close/retire/rebind/finish |
+
 ## 只读退避
 
 status/list/read/wait仅对限定瞬时错误按2、5、15、30秒（之后封顶30）退避；默认`--retry-budget-s 300`。正预算由一次helper命令整条只读链共享，不在verify/idle内部刷新；每次调用timeout不超过剩余预算。0关闭自动重试，各必要查询仍仅调一次且有有限timeout。read_attempts与模型提交attempts分开，不把只读轮询混为模型工作量。
@@ -107,7 +132,9 @@ BLOCKED在stderr输出JSON，包含category、retryable、task累计attempts和r
 | unreachable，只读调用 | 原绑定内预算退避；耗尽停止报告；创建前不可达等一至两分钟再查原操作，不推断实例消失或未送达 |
 | has_live_binding | 保留已有绑定，使用ensure核验；不另建终端 |
 | create_unverified | 保留reservation/回执/candidate；已知精确handle仅继续只读核验；仅符合显式启动重放全部门禁才可同ID重放一次，旧无ID继续pending |
-| busy、锁占用、真实草稿 | 保留草稿，稍后只读核对原绑定；不清空输入、不换终端 |
+| busy、锁占用 | 保留草稿，稍后只读核对原绑定；不清空输入、不换终端 |
+| nonempty_draft | retryable=false；只报告草稿元数据，用户明确授权后 clear-draft --confirm；再 ensure/send/finish，后两者绝不自动清 |
+| sticky_draft | retryable=false；最多两次清理仍失败或 composer 残留，停止，不重跑 clear/finish/换绑；人工处置须另行选择 |
 | identity_changed | 停止发送，核对runtime/handle/incarnation；只有符合门禁且用户确认后才显式rebind |
 | uncertain_send / creating | 保留intent/白名单receipt；消息可只读reconcile，创建按candidate规则核查；不重发、不finish、不换ID/目标 |
 | not_sent且task还有次数 | 同ID同文显式send，重做verify/idle；第三次阻断 |

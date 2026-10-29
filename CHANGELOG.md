@@ -2,6 +2,14 @@
 
 作者：elvis。
 
+## 0.1.0.dev13 — 2026-10-28，源码候选
+
+- screen JSON draft 非空时，send/finish 返回不可自动重试的 `nonempty_draft`；只报告存在性、逻辑行数、UTF-8 字节数与 SHA256，真实草稿默认保留。
+- 新增 `clear-draft`：默认只读；用户明确授权后 `--confirm` 先验身份/idle/auto，再以独立、不带 Enter 的 Ctrl+U/Ctrl+K burst 清理；按逻辑行数加 8、上限 40 行，最多再发一次最大 burst 并重验。仍失败为 `sticky_draft`；未知回执不重试，不自动 finish/close/rebind/retire。
+- send/finish 不自动清；清理与正文严格分开 write，清完后须另行核验和执行原命令。保留原任务历史、次数及首次任务占位符限制。
+- screen 完整性要求 limited/truncated 明确为布尔 false；清理后的未知读回或忙碌不提示自动重试整个变更命令。
+- 新增隔离 mock Orca 回归和决策表；只修改源仓库，未提交、发布或更新安装，真实远端清理未验收。
+
 ## 0.1.0.dev12 — 2026-10-27
 
 - task_packet check 支持零变更空补丁：PATCH_LINES 为 0 且摘要为空字节 SHA256 时判定基线一致放行，输出 0 字节补丁，不误报 metadata 异常。

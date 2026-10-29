@@ -1,5 +1,6 @@
 """Author: elvis. Real private-state/locking tests; only remote Orca is doubled."""
 import copy
+import hashlib
 import importlib.util
 import json
 import os
@@ -41,6 +42,7 @@ class RemoteOrca:
         self.mode = 'auto mode on'
         self.draft = ''
         self.native_draft = None  # Orca 1.4.229 typed-text (non-dim, before cursor) classification
+        self.clear_drafts = []  # Draft observed after each accepted non-submitting clear.
         self.source = 'screen'
         self.runtime = 'runtime-one'
         self.prompt_space = ' '
@@ -114,6 +116,12 @@ class RemoteOrca:
             self.sends += 1
             if self.lose_send:
                 raise TimeoutError('response lost after send')
+            if '--enter' not in args:
+                if self.clear_drafts:
+                    self.native_draft = self.clear_drafts.pop(0)
+                # Upstream clearMobileNativeChatInput: no prompt receipt or model stages.
+                envelope['result'] = {'send': {'accepted': True}}
+                return envelope
             terminal = next(t for t in self.terminals if t['handle'] == args[args.index('--terminal') + 1])
             envelope['result'] = {'send': {'handle': terminal['handle'], 'accepted': True,
                 'prompt': {'requestId': 'request-' + str(self.sends),
@@ -205,8 +213,15 @@ elif action=='launch':
   with (p/'replayed-cli').open('a') as f: f.write('replay\\n')
   time.sleep(.1)
 elif action=='wait': r={'wait':{'satisfied':True}}
-elif action=='read': r={'terminal':{'handle':'term-cli','tail':['────────','❯','────────','auto mode on'],'source':'screen' if '--screen' in args else 'stream','truncated':False,'limited':False,'latestCursor':'1'}}
-elif action=='send': r={'send':{'handle':'term-cli','accepted':True,'prompt':{'requestId':'request-cli','processIncarnation':'inc-cli','stages':['input_accepted','turn_started']}}}
+elif action=='read':
+ r={'terminal':{'handle':'term-cli','tail':['────────','❯','────────','auto mode on'],'source':'screen' if '--screen' in args else 'stream','truncated':False,'limited':False,'latestCursor':'1'}}
+ if '--screen' in args and (p/'draft-cli').exists(): r['terminal']['draft']=(p/'draft-cli').read_text()
+elif action=='send':
+ if '--enter' not in args:
+  assert set(args[args.index('--text')+1])=={'\\x15','\\x0b'}
+  (p/'draft-cli').write_text('')
+  r={'send':{'accepted':True}}
+ else: r={'send':{'handle':'term-cli','accepted':True,'prompt':{'requestId':'request-cli','processIncarnation':'inc-cli','stages':['input_accepted','turn_started']}}}
 else: raise SystemExit('unsupported fixture operation')
 print(json.dumps({'ok':True,'result':r,'_meta':{'runtimeId':'runtime-cli'}}))
 ''')
@@ -1024,6 +1039,311 @@ print(json.dumps({'ok':True,'result':r,'_meta':{'runtimeId':'runtime-cli'}}))
             with self.assertRaises(ValueError): m.send('task-one', 'main', 'text')
             setattr(self.remote, attr, original)
         self.assertEqual(self.remote.sends, 0)
+
+    def sticky_send_calls(self):
+        return [args for args, _ in self.remote.calls if args[:2] == ['terminal', 'send']]
+
+    def assert_draft_metadata(self, result, draft, lines):
+        self.assertEqual(result['diagnostic'], {
+            'draft_present': bool(draft), 'draft_lines': lines,
+            'draft_bytes': len(draft.encode('utf-8')),
+            'draft_sha256': hashlib.sha256(draft.encode('utf-8')).hexdigest()})
+        if draft:
+            for private_line in ('PRIVATE-DRAFT', '屏幕秘密'):
+                self.assertNotIn(private_line, json.dumps(result, ensure_ascii=False))
+
+    def test_sticky_draft_send_reports_nonempty_metadata_without_sending(self):
+        m = self.manager(); m.create(confirm=True)
+        self.remote.native_draft = 'PRIVATE-DRAFT😀\r\n第二行\rthird\n'
+        before = (self.state / 'bindings.json').read_bytes()
+        with self.assertRaises(self.mod.Blocked) as caught:
+            m.send('task-one', 'main', 'reviewed body')
+        result = caught.exception.result()
+        self.assertEqual(result['category'], 'nonempty_draft')
+        self.assertFalse(result['retryable'])
+        self.assertIn('clear-draft', result['detail'])
+        self.assert_draft_metadata(result, self.remote.native_draft, 4)
+        self.assertEqual(self.sticky_send_calls(), [])
+        self.assertEqual((self.state / 'bindings.json').read_bytes(), before)
+
+    def test_sticky_draft_finish_reports_metadata_and_keeps_task_open(self):
+        m = self.manager(); m.create(confirm=True); m.send('task-one', 'main', 'body')
+        self.remote.native_draft = 'PRIVATE-DRAFT\nsecond'
+        before = (self.state / 'bindings.json').read_bytes()
+        with self.assertRaises(self.mod.Blocked) as caught:
+            m.finish('task-one')
+        result = caught.exception.result()
+        self.assertEqual(result['category'], 'nonempty_draft')
+        self.assertFalse(result['retryable'])
+        self.assert_draft_metadata(result, self.remote.native_draft, 2)
+        self.assertEqual(len(self.sticky_send_calls()), 1)
+        self.assertEqual((self.state / 'bindings.json').read_bytes(), before)
+
+    def test_sticky_draft_preview_is_read_only_without_lock_or_send(self):
+        m = self.manager(); m.create(confirm=True)
+        self.remote.native_draft = 'PRIVATE-DRAFT\nsecond'
+        (self.state / 'bindings.lock').unlink()
+        before = (self.state / 'bindings.json').read_bytes()
+        result = m.clear_draft()
+        self.assertEqual(result['action'], 'draft-inspected')
+        self.assert_draft_metadata(result, self.remote.native_draft, 2)
+        self.assertEqual(self.sticky_send_calls(), [])
+        self.assertFalse((self.state / 'bindings.lock').exists())
+        self.assertEqual((self.state / 'bindings.json').read_bytes(), before)
+
+    def test_sticky_draft_preview_without_binding_creates_no_state(self):
+        with self.assertRaises(self.mod.Blocked): self.manager().clear_draft()
+        self.assertFalse(self.state.exists())
+        self.assertEqual(self.remote.calls, [])
+
+    def test_sticky_draft_confirm_burst_counts_logical_lines_without_enter(self):
+        for index, (draft, repetitions) in enumerate((('one', 17), ('one\ntwo', 19),
+                ('one\r\ntwo\rthree\n', 23), ('one\u2028two', 17), (' ', 17))):
+            with self.subTest(draft=draft):
+                self.state = self.root / ('clear-' + str(index)); self.remote = RemoteOrca()
+                m = self.manager(); m.create(confirm=True)
+                self.remote.native_draft = draft; self.remote.clear_drafts = [None]
+                before = (self.state / 'bindings.json').read_bytes()
+                result = m.clear_draft(confirm=True)
+                self.assertEqual(result['action'], 'draft-cleared')
+                self.assertEqual(result['clear_attempts'], 1)
+                self.assert_draft_metadata(result, '', 0)
+                sends = self.sticky_send_calls()
+                self.assertEqual(len(sends), 1)
+                self.assertEqual(sends[0][sends[0].index('--text') + 1],
+                                 '\x15' * repetitions + '\x0b' * repetitions)
+                self.assertNotIn('--enter', sends[0])
+                self.assertNotIn('--wait-submit', sends[0])
+                self.assertEqual((self.state / 'bindings.json').read_bytes(), before)
+
+    def test_sticky_draft_large_input_caps_first_burst_at_forty_lines(self):
+        m = self.manager(); m.create(confirm=True)
+        self.remote.native_draft = 'x\n' * 80; self.remote.clear_drafts = [None]
+        m.clear_draft(confirm=True)
+        sends = self.sticky_send_calls()
+        self.assertEqual(len(sends), 1)
+        self.assertEqual(sends[0][sends[0].index('--text') + 1], '\x15' * 79 + '\x0b' * 79)
+
+    def test_sticky_draft_clear_and_later_body_are_separate_writes(self):
+        m = self.manager(); m.create(confirm=True)
+        self.remote.native_draft = 'one\ntwo'; self.remote.clear_drafts = [None]
+        m.clear_draft(confirm=True)
+        self.assertEqual(m.send('task-one', 'main', 'reviewed body')['action'], 'sent')
+        sends = self.sticky_send_calls()
+        self.assertEqual(len(sends), 2)
+        self.assertEqual(sends[0][sends[0].index('--text') + 1], '\x15' * 19 + '\x0b' * 19)
+        self.assertNotIn('--enter', sends[0])
+        self.assertIn('--enter', sends[1])
+        body = sends[1][sends[1].index('--text') + 1]
+        self.assertTrue(body.startswith('reviewed body\n\ngrok-cc-msg:task-one/main/'))
+        self.assertNotIn('\x15', body); self.assertNotIn('\x0b', body)
+        self.assertEqual(self.saved()['tasks']['task-one']['attempts'], 1)
+
+    def test_sticky_draft_second_maximum_burst_can_succeed(self):
+        m = self.manager(); m.create(confirm=True)
+        self.remote.native_draft = 'one\ntwo'; self.remote.clear_drafts = ['residue', None]
+        result = m.clear_draft(confirm=True)
+        self.assertEqual(result['action'], 'draft-cleared')
+        self.assertEqual(result['clear_attempts'], 2)
+        self.assertEqual([a[a.index('--text') + 1] for a in self.sticky_send_calls()],
+                         ['\x15' * 19 + '\x0b' * 19, '\x15' * 79 + '\x0b' * 79])
+        self.assertTrue(all('--enter' not in a for a in self.sticky_send_calls()))
+
+    def test_sticky_draft_two_failed_bursts_stop_without_finish(self):
+        m = self.manager(); m.create(confirm=True); m.send('task-one', 'main', 'body')
+        self.remote.native_draft = 'PRIVATE-DRAFT\nsecond'
+        before = (self.state / 'bindings.json').read_bytes()
+        with self.assertRaises(self.mod.Blocked) as caught: m.clear_draft(confirm=True)
+        result = caught.exception.result()
+        self.assertEqual(result['category'], 'sticky_draft'); self.assertFalse(result['retryable'])
+        self.assert_draft_metadata(result, self.remote.native_draft, 2)
+        self.assertEqual([a[a.index('--text') + 1] for a in self.sticky_send_calls()[1:]],
+                         ['\x15' * 19 + '\x0b' * 19, '\x15' * 79 + '\x0b' * 79])
+        self.assertEqual(self.remote.creates, 1)
+        self.assertFalse(self.saved()['tasks']['task-one']['closed'])
+        self.assertEqual((self.state / 'bindings.json').read_bytes(), before)
+
+    def test_sticky_draft_busy_rejects_clear_without_send(self):
+        m = self.manager(); m.create(confirm=True)
+        self.remote.native_draft = 'PRIVATE-DRAFT'; self.remote.busy = True
+        with self.assertRaises(self.mod.Blocked) as caught: m.clear_draft(confirm=True)
+        self.assertEqual(caught.exception.category, 'busy')
+        self.assertEqual(self.sticky_send_calls(), [])
+
+    def test_sticky_draft_already_empty_confirm_does_not_send(self):
+        m = self.manager(); m.create(confirm=True)
+        result = m.clear_draft(confirm=True)
+        self.assertEqual(result['action'], 'draft-already-clear')
+        self.assert_draft_metadata(result, '', 0)
+        self.assertEqual(self.sticky_send_calls(), [])
+
+    def test_sticky_draft_clear_then_finish_preserves_history_and_attempts(self):
+        m = self.manager(); bound = m.create(confirm=True); m.send('task-one', 'main', 'body')
+        before = self.saved()
+        self.remote.native_draft = 'PRIVATE-DRAFT'; self.remote.clear_drafts = [None]
+        m.clear_draft(confirm=True)
+        self.assertEqual(self.saved(), before)
+        result = m.finish('task-one')
+        self.assertEqual(result['action'], 'dispatch-task-closed')
+        self.assertFalse(result['project_pass'])
+        self.assertEqual(result['binding']['handle'], bound['handle'])
+        self.assertEqual(self.saved()['tasks']['task-one']['messages'], before['tasks']['task-one']['messages'])
+        self.assertEqual(self.saved()['tasks']['task-one']['attempts'], 1)
+        self.assertEqual(len(self.sticky_send_calls()), 2)
+
+    def test_sticky_draft_non_auto_or_unreadable_screen_never_clears(self):
+        m = self.manager(); m.create(confirm=True); self.remote.native_draft = 'PRIVATE-DRAFT'
+        for attr, value in (('mode', 'bypass permissions on'), ('source', 'screen-unavailable')):
+            old = getattr(self.remote, attr); setattr(self.remote, attr, value)
+            with self.subTest(attr=attr), self.assertRaises(self.mod.Blocked): m.clear_draft(confirm=True)
+            setattr(self.remote, attr, old)
+        self.assertEqual(self.sticky_send_calls(), [])
+
+    def test_sticky_draft_identity_drift_prevents_clear(self):
+        m = self.manager(); m.create(confirm=True); self.remote.native_draft = 'PRIVATE-DRAFT'
+        self.remote.terminals[0]['incarnationId'] = 'changed'
+        with self.assertRaises(self.mod.Blocked) as caught: m.clear_draft(confirm=True)
+        self.assertEqual(caught.exception.category, 'identity_changed')
+        self.assertEqual(self.sticky_send_calls(), [])
+
+    def test_sticky_draft_unknown_or_rejected_clear_does_not_retry(self):
+        for index, failure in enumerate(('timeout', 'nonzero', 'rejected', 'runtime')):
+            with self.subTest(failure=failure):
+                self.state = self.root / ('unknown-clear-' + str(index)); self.remote = RemoteOrca()
+                m = self.manager(); m.create(confirm=True); self.remote.native_draft = 'PRIVATE-DRAFT'
+                before = (self.state / 'bindings.json').read_bytes()
+                def fail(args):
+                    if args[:2] != ['terminal', 'send']: return None
+                    if failure == 'timeout': raise TimeoutError('PRIVATE-DRAFT')
+                    if failure == 'nonzero': raise self.failure('nonzero', stderr='PRIVATE-DRAFT')
+                    return {'ok': True, '_meta': {'runtimeId': 'other' if failure == 'runtime' else 'runtime-one'},
+                            'result': {'send': {'accepted': failure != 'rejected'}}}
+                self.remote.hook = fail
+                with self.assertRaises(self.mod.Blocked) as caught: m.clear_draft(confirm=True)
+                self.assertFalse(caught.exception.retryable)
+                self.assertNotIn('PRIVATE-DRAFT', json.dumps(caught.exception.result()))
+                self.assertEqual(len(self.sticky_send_calls()), 1)
+                self.assertEqual((self.state / 'bindings.json').read_bytes(), before)
+
+    def test_sticky_draft_empty_json_with_residual_composer_cannot_succeed(self):
+        m = self.manager(); m.create(confirm=True)
+        self.remote.native_draft = 'PRIVATE-DRAFT'; self.remote.clear_drafts = [None]
+        self.remote.draft = '屏幕秘密'
+        with self.assertRaises(self.mod.Blocked) as caught: m.clear_draft(confirm=True)
+        self.assertEqual(caught.exception.category, 'sticky_draft')
+        self.assertFalse(caught.exception.retryable)
+        self.assert_draft_metadata(caught.exception.result(), '', 0)
+        self.assertEqual(len(self.sticky_send_calls()), 1)
+
+    def test_sticky_draft_clear_accepts_only_exact_empty_placeholders(self):
+        m = self.manager(); m.create(confirm=True); m.send('task-one', 'main', 'body')
+        self.remote.native_draft = 'PRIVATE-DRAFT'; self.remote.clear_drafts = [None]
+        self.remote.draft = 'Try "fix lint errors"'
+        self.assertEqual(m.clear_draft(confirm=True)['action'], 'draft-cleared')
+        # Ordinary finish retains the pre-existing first-task-only hint rule.
+        with self.assertRaises(ValueError): m.finish('task-one')
+        self.remote.draft = ''
+        self.assertEqual(m.finish('task-one')['action'], 'dispatch-task-closed')
+
+    def test_sticky_draft_unresolved_message_blocks_confirmed_clear(self):
+        m = self.manager(); m.create(confirm=True); m.send('task-one', 'main', 'body')
+        self.change_row(lambda row: row['tasks']['task-one']['messages']['main'].update(state='sending'))
+        self.remote.native_draft = 'PRIVATE-DRAFT'
+        with self.assertRaises(self.mod.Blocked) as caught: m.clear_draft(confirm=True)
+        self.assertEqual(caught.exception.category, 'uncertain_send')
+        self.assertEqual(len(self.sticky_send_calls()), 1)
+
+    def test_sticky_draft_busy_after_first_clear_prevents_second_burst(self):
+        m = self.manager(); m.create(confirm=True); self.remote.native_draft = 'PRIVATE-DRAFT'
+        def become_busy(args):
+            if args[:2] == ['terminal', 'send']: self.remote.busy = True
+        self.remote.hook = become_busy
+        with self.assertRaises(self.mod.Blocked) as caught: m.clear_draft(confirm=True)
+        self.assertEqual(caught.exception.category, 'busy')
+        self.assertFalse(caught.exception.retryable)
+        self.assertEqual(len(self.sticky_send_calls()), 1)
+
+    def test_sticky_draft_incomplete_screen_never_proves_clear(self):
+        for stage in ('before', 'after'):
+            for flag in ('limited', 'truncated'):
+                for index, value in enumerate(('missing', None, 0, [])):
+                    with self.subTest(stage=stage, flag=flag, value=value):
+                        self.state = self.root / ('screen-' + stage + flag + str(index))
+                        self.remote = RemoteOrca(); m = self.manager(); m.create(confirm=True)
+                        self.remote.native_draft = 'PRIVATE-DRAFT'; self.remote.clear_drafts = [None]
+                        original = self.remote.__call__
+                        def incomplete(args):
+                            if args[:2] != ['terminal', 'read'] or '--screen' not in args: return None
+                            if stage == 'after' and self.remote.sends == 0: return None
+                            self.remote.hook = None
+                            result = original(args)
+                            self.remote.hook = incomplete
+                            if value == 'missing': result['result']['terminal'].pop(flag)
+                            else: result['result']['terminal'][flag] = value
+                            return result
+                        self.remote.hook = incomplete
+                        before = (self.state / 'bindings.json').read_bytes()
+                        with self.assertRaises(self.mod.Blocked) as caught: m.clear_draft(confirm=True)
+                        self.assertEqual(caught.exception.category, 'integrity_failure')
+                        self.assertFalse(caught.exception.retryable)
+                        self.assertEqual(len(self.sticky_send_calls()), 0 if stage == 'before' else 1)
+                        self.assertEqual((self.state / 'bindings.json').read_bytes(), before)
+
+    def test_sticky_draft_readback_failure_is_not_retryable_after_clear(self):
+        for action in ('list', 'wait', 'read'):
+            with self.subTest(action=action):
+                self.state = self.root / ('readback-' + action); self.remote = RemoteOrca()
+                m = self.manager(); m.create(confirm=True); m.retry_budget_s = 0
+                self.remote.native_draft = 'PRIVATE-DRAFT'
+                before = (self.state / 'bindings.json').read_bytes()
+                def unavailable(args):
+                    if self.remote.sends and args[:2] == ['terminal', action]:
+                        raise self.failure('nonzero', code='transport_unavailable', stderr='PRIVATE-DRAFT')
+                self.remote.hook = unavailable
+                with self.assertRaises(self.mod.Blocked) as caught: m.clear_draft(confirm=True)
+                self.assertEqual(caught.exception.category, 'unreachable')
+                self.assertFalse(caught.exception.retryable)
+                self.assertNotIn('PRIVATE-DRAFT', json.dumps(caught.exception.result()))
+                self.assertEqual(len(self.sticky_send_calls()), 1)
+                self.assertEqual((self.state / 'bindings.json').read_bytes(), before)
+
+    def test_sticky_draft_cli_block_inspect_confirm_and_finish(self):
+        executable = self.cli_fixture(); env = self.fixture_env()
+        common = ['--controller', 'codex', '--project-root', str(self.project), '--worktree', WORKTREE,
+                  '--state-dir', str(self.state), '--orca', str(executable)]
+        def run(command, extra=()):
+            return subprocess.run([sys.executable, '-B', str(TARGET), command, *common, *extra],
+                                  env=env, capture_output=True, text=True, timeout=15)
+        self.assertEqual(run('create', ['--project', WORKTREE, '--confirm']).returncode, 0)
+        prompt = self.root / 'reviewed-body'; prompt.write_text('reviewed body')
+        self.assertEqual(run('send', ['--task-id', 'task-cli', '--text-file', str(prompt)]).returncode, 0)
+        (self.root / 'draft-cli').write_text('PRIVATE-DRAFT\nsecond')
+        before = (self.state / 'bindings.json').read_bytes()
+        for command, extra in (('finish', ['--task-id', 'task-cli']),
+                ('send', ['--task-id', 'task-cli', '--message-id', 'export-1', '--text-file', str(prompt)])):
+            result = run(command, extra)
+            self.assertEqual(result.returncode, 1)
+            blocked = json.loads(result.stderr)
+            self.assertEqual(blocked['category'], 'nonempty_draft'); self.assertFalse(blocked['retryable'])
+            self.assert_draft_metadata(blocked, 'PRIVATE-DRAFT\nsecond', 2)
+        (self.state / 'bindings.lock').unlink()
+        result = run('clear-draft')
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(json.loads(result.stdout)['action'], 'draft-inspected')
+        self.assertFalse((self.state / 'bindings.lock').exists())
+        self.assertEqual((self.state / 'bindings.json').read_bytes(), before)
+        cleared = run('clear-draft', ['--confirm'])
+        self.assertEqual(cleared.returncode, 0, cleared.stderr)
+        self.assertEqual(json.loads(cleared.stdout)['action'], 'draft-cleared')
+        self.assertEqual((self.state / 'bindings.json').read_bytes(), before)
+        finished = run('finish', ['--task-id', 'task-cli'])
+        self.assertEqual(finished.returncode, 0, finished.stderr)
+        self.assertFalse(json.loads(finished.stdout)['project_pass'])
+        calls = [json.loads(line) for line in (self.root / 'native-calls.jsonl').read_text().splitlines()]
+        sends = [args for args in calls if args[:2] == ['terminal', 'send']]
+        self.assertEqual(len(sends), 2)
+        self.assertIn('--enter', sends[0]); self.assertNotIn('--enter', sends[1])
+        self.assertEqual(sends[1][sends[1].index('--text') + 1], '\x15' * 19 + '\x0b' * 19)
 
     def test_native_empty_startup_hint_with_nbsp_is_not_a_user_draft(self):
         m = self.manager(); m.create(confirm=True)

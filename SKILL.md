@@ -58,11 +58,23 @@ python3 <skill-dir>/scripts/session_binding.py create <同一组会话与目标�
 
 未知结果保留creating；重复confirm只核验已保存的精确结果，不自动启动或重放。新`terminal.create.claude-auto.v1`没有原生operationId/replay，丢失结果继续pending。既有`agent.launch.v2`预约保留原协议；只有它已保存有效原生operationId及明确retrySafe证据时，才可按[显式启动重放](references/session-binding.md#显式启动重放)在原目标、runtime、可执行文件和目录，显式重放同ID一次。无ID的旧pending保持未知；不能借升级、空清单、随机ID或新state-dir恢复创建机会。启动重放与发送`--retry-request`是两个不同协议。
 
-所有wait/read只针对返回的handle/runtime/incarnation；发送前保存cursor和intent，receipt仅保留白名单字段。保留真实草稿、未知屏幕、非auto、身份漂移、creating/sending未知结果；不清空输入、不自动换绑、开窗、重启网络或删registry。
+所有wait/read只针对返回的handle/runtime/incarnation；发送前保存cursor和intent，receipt仅保留白名单字段。保留真实草稿、未知屏幕、非auto、身份漂移、creating/sending未知结果；send/finish不清空输入，清理仅走下述用户确认入口。不自动换绑、开窗、重启网络或删registry。
 
 同task主消息main；accepted/sending重复调用只resume。task累计最多2次提交（含合法export），unknown不因还有次数就重发；同message仅明确not_sent且同文才可显式再提交，并重做verify/idle。list/read/wait另按默认300秒预算退避，不触发新模型任务。`input_accepted`和`tui-idle`都不代表产物完成。
 
 故障只读用`reconcile <同参数> --task-id <id>`；marker/空闲/无新输入不能解锁。当前原生`--retry-request`缺官方契约，在任何Orca调用前unsupported，不能手工send绕过。只有已有bound、无active/unknown且用户确认精确目标后，才允许显式rebind，旧绑定归档不删除。完整[状态、退避、换绑门禁和错误决策表](references/session-binding.md)。
+
+### 粘住 draft：三步排查
+
+1. 读取原绑定的 screen JSON：`draft` 字段优先于视觉 `❯`。可用 `python3 <skill-dir>/scripts/session_binding.py clear-draft <相同会话与目标参数>` 只读取得 JSON 摘要；不带 `--confirm` 零 send。`nonempty_draft` 的 `diagnostic` 只含 `draft_present`、`draft_lines`、`draft_bytes`、`draft_sha256`，不含正文。
+2. 先保留需要的真实未发送文本，取得用户对当前草稿清理的明确授权，再执行 `python3 <skill-dir>/scripts/session_binding.py clear-draft <相同会话与目标参数> --confirm`。它先验身份/idle/auto，最多两次独立且不带 Enter 的清理 write；不提交正文、不改权限或绑定。
+3. 只在 `draft-cleared` / `draft-already-clear` 后另行 ensure，再按原任务 send/finish。`sticky_draft` 或未知清理结果立即停止；不连续重跑 clear、不自动 close/retire/rebind。用户可选择关闭终端后另行安排 `retire-dead-binding`；本源码未实现此命令，本轮只说明人工恢复边界。
+
+| 现象 | 动作 |
+| --- | --- |
+| draft 空且 composer 合法 | 正常 send/finish，沿用原有身份、auto、任务历史及精确占位符门禁 |
+| draft 非空 | BLOCKED nonempty_draft；真实草稿默认保留；用户确认后 clear-draft，再 ensure/send/finish |
+| clear-draft 两次仍粘 | BLOCKED sticky_draft，停止报告；用户可选择关终端及另行批准退役流程，不自动执行 |
 
 ## 3. 完整回收、Mac检查与验收
 
